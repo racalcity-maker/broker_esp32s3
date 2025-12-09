@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
@@ -29,11 +30,13 @@ static const char *TAG = "mqtt_core";
 #define MQTT_MAX_PACKET        1024
 #define MQTT_RETAIN_MAX        32
 #define MQTT_CLIENT_STACK      6144
+#define MQTT_ACCEPT_STACK      4096
 
 typedef struct {
     bool in_use;
     char topic[MQTT_MAX_TOPIC];
-    char payload[MQTT_MAX_PAYLOAD];
+    char *payload;
+    size_t payload_len;
     uint8_t qos;
 } retain_entry_t;
 
@@ -101,16 +104,85 @@ static const event_topic_map_t k_incoming_map[] = {
     {EVENT_WEB_COMMAND, "laser/"},
 };
 
-static mqtt_session_t s_sessions[MQTT_MAX_CLIENTS];
-static retain_entry_t s_retain[MQTT_RETAIN_MAX];
+static mqtt_session_t *s_sessions = NULL;
+static StackType_t *s_session_stacks[MQTT_MAX_CLIENTS];
+static StaticTask_t *s_session_tcbs[MQTT_MAX_CLIENTS];
+static uint8_t *s_session_tx_bufs[MQTT_MAX_CLIENTS];
+static retain_entry_t *s_retain = NULL;
 static SemaphoreHandle_t s_lock = NULL;
 static uint8_t s_client_count = 0;
 static int s_listen_sock = -1;
 static TaskHandle_t s_accept_task = NULL;
+static StackType_t *s_accept_stack = NULL;
+static StaticTask_t *s_accept_tcb = NULL;
 static esp_timer_handle_t s_sweep_timer = NULL;
 
 static void lock(void);
 static void unlock(void);
+
+static inline size_t session_index(const mqtt_session_t *sess)
+{
+    if (!sess || !s_sessions) {
+        return MQTT_MAX_CLIENTS;
+    }
+    return (size_t)(sess - s_sessions);
+}
+
+static bool ensure_session_task_storage(size_t idx)
+{
+    if (idx >= MQTT_MAX_CLIENTS) {
+        return false;
+    }
+    if (!s_session_stacks[idx]) {
+        s_session_stacks[idx] = heap_caps_malloc(MQTT_CLIENT_STACK * sizeof(StackType_t),
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_session_stacks[idx]) {
+            return false;
+        }
+    }
+    if (!s_session_tcbs[idx]) {
+        s_session_tcbs[idx] = heap_caps_malloc(sizeof(StaticTask_t),
+                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!s_session_tcbs[idx]) {
+            heap_caps_free(s_session_stacks[idx]);
+            s_session_stacks[idx] = NULL;
+            return false;
+        }
+    }
+    return true;
+}
+
+static uint8_t *ensure_session_tx_buffer(size_t idx)
+{
+    if (idx >= MQTT_MAX_CLIENTS) {
+        return NULL;
+    }
+    if (!s_session_tx_bufs[idx]) {
+        s_session_tx_bufs[idx] = heap_caps_malloc(MQTT_MAX_PACKET, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    return s_session_tx_bufs[idx];
+}
+
+static bool ensure_accept_task_storage(void)
+{
+    if (!s_accept_stack) {
+        s_accept_stack = heap_caps_malloc(MQTT_ACCEPT_STACK * sizeof(StackType_t),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_accept_stack) {
+            return false;
+        }
+    }
+    if (!s_accept_tcb) {
+        s_accept_tcb = heap_caps_malloc(sizeof(StaticTask_t),
+                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!s_accept_tcb) {
+            heap_caps_free(s_accept_stack);
+            s_accept_stack = NULL;
+            return false;
+        }
+    }
+    return true;
+}
 
 static bool client_id_matches(const char *id, const char *prefix)
 {
@@ -311,6 +383,9 @@ static void unlock(void)
 
 static mqtt_session_t *alloc_session(void)
 {
+    if (!s_sessions) {
+        return NULL;
+    }
     for (size_t i = 0; i < MQTT_MAX_CLIENTS; ++i) {
         if (!s_sessions[i].active) {
             memset(&s_sessions[i], 0, sizeof(s_sessions[i]));
@@ -346,6 +421,8 @@ static void free_session(mqtt_session_t *s)
         shutdown(s->sock, SHUT_RDWR);
         closesocket(s->sock);
     }
+    s->sock = -1;
+    s->task = NULL;
     if (s_client_count > 0) {
         s_client_count--;
     }
@@ -375,8 +452,23 @@ static void sweep_idle_sessions(void)
 
 // (placeholder removed; free_session defined above)
 
+static void retain_free_entry(retain_entry_t *slot)
+{
+    if (!slot) {
+        return;
+    }
+    if (slot->payload) {
+        heap_caps_free(slot->payload);
+        slot->payload = NULL;
+    }
+    slot->payload_len = 0;
+}
+
 static retain_entry_t *retain_get(const char *topic)
 {
+    if (!s_retain || !topic) {
+        return NULL;
+    }
     for (size_t i = 0; i < MQTT_RETAIN_MAX; ++i) {
         if (s_retain[i].in_use && strcmp(s_retain[i].topic, topic) == 0) {
             return &s_retain[i];
@@ -387,6 +479,9 @@ static retain_entry_t *retain_get(const char *topic)
 
 static void retain_store(const char *topic, const char *payload, uint8_t qos)
 {
+    if (!s_retain || !topic || !payload) {
+        return;
+    }
     retain_entry_t *slot = retain_get(topic);
     if (!slot) {
         for (size_t i = 0; i < MQTT_RETAIN_MAX; ++i) {
@@ -400,9 +495,20 @@ static void retain_store(const char *topic, const char *payload, uint8_t qos)
         ESP_LOGW(TAG, "retain table full, dropping %s", topic);
         return;
     }
+    size_t len = strnlen(payload, MQTT_MAX_PAYLOAD - 1);
+    char *buf = heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGW(TAG, "retain alloc failed for %s", topic);
+        return;
+    }
+    memcpy(buf, payload, len);
+    buf[len] = '\0';
+    retain_free_entry(slot);
     slot->in_use = true;
     strncpy(slot->topic, topic, sizeof(slot->topic) - 1);
-    strncpy(slot->payload, payload, sizeof(slot->payload) - 1);
+    slot->topic[sizeof(slot->topic) - 1] = '\0';
+    slot->payload = buf;
+    slot->payload_len = len;
     slot->qos = qos;
 }
 
@@ -426,9 +532,14 @@ static int send_connack(int sock, uint8_t rc)
     return send_all(sock, pkt, sizeof(pkt));
 }
 
-static int send_suback(int sock, uint16_t pid, uint8_t *qos, size_t count)
+static int send_suback(mqtt_session_t *sess, uint16_t pid, uint8_t *qos, size_t count)
 {
-    uint8_t buf[MQTT_MAX_PACKET];
+    size_t slot = session_index(sess);
+    uint8_t *buf = ensure_session_tx_buffer(slot);
+    if (!buf) {
+        ESP_LOGE(TAG, "suback buffer alloc failed");
+        return -1;
+    }
     size_t idx = 0;
     buf[idx++] = 0x90;
     size_t rem_idx = idx++;
@@ -438,7 +549,7 @@ static int send_suback(int sock, uint16_t pid, uint8_t *qos, size_t count)
         buf[idx++] = qos[i];
     }
     buf[rem_idx] = (uint8_t)(idx - 2);
-    return send_all(sock, buf, idx);
+    return send_all(sess->sock, buf, idx);
 }
 
 static int send_puback(int sock, uint16_t pid)
@@ -453,8 +564,17 @@ static int send_pingresp(int sock)
     return send_all(sock, buf, sizeof(buf));
 }
 
-static int send_publish_packet(int sock, const char *topic, const char *payload, uint8_t qos, bool retain, uint16_t pid)
+static int send_publish_packet(mqtt_session_t *sess, const char *topic, const char *payload, uint8_t qos, bool retain, uint16_t pid)
 {
+    if (!sess) {
+        return -1;
+    }
+    size_t slot = session_index(sess);
+    uint8_t *buf = ensure_session_tx_buffer(slot);
+    if (!buf) {
+        ESP_LOGE(TAG, "publish buffer alloc failed");
+        return -1;
+    }
     size_t topic_len = strlen(topic);
     size_t payload_len = strlen(payload);
     size_t rem_len = 2 + topic_len + payload_len + (qos ? 2 : 0);
@@ -464,7 +584,6 @@ static int send_publish_packet(int sock, const char *topic, const char *payload,
     size_t rem_enc_len = encode_remaining_length(rem_enc, rem_len);
 
     size_t idx = 0;
-    uint8_t buf[MQTT_MAX_PACKET];
     buf[idx++] = header;
     memcpy(&buf[idx], rem_enc, rem_enc_len);
     idx += rem_enc_len;
@@ -478,7 +597,7 @@ static int send_publish_packet(int sock, const char *topic, const char *payload,
     }
     memcpy(&buf[idx], payload, payload_len);
     idx += payload_len;
-    return send_all(sock, buf, idx);
+    return send_all(sess->sock, buf, idx);
 }
 
 static void publish_to_subscribers(const char *topic, const char *payload, uint8_t qos, bool retain_flag, mqtt_session_t *exclude)
@@ -496,7 +615,7 @@ static void publish_to_subscribers(const char *topic, const char *payload, uint8
         for (size_t j = 0; j < s->sub_count; ++j) {
             if (topic_matches_filter(s->subs[j].topic, topic)) {
                 uint16_t pid = (qos ? (uint16_t)(esp_random() & 0xFFFF) : 0);
-                if (send_publish_packet(s->sock, topic, payload, qos, retain_flag, pid) < 0) {
+                if (send_publish_packet(s, topic, payload, qos, retain_flag, pid) < 0) {
                     ESP_LOGW(TAG, "send publish failed to %s", s->client_id);
                 }
                 break;
@@ -508,13 +627,17 @@ static void publish_to_subscribers(const char *topic, const char *payload, uint8
 
 static void deliver_retain(mqtt_session_t *sess, const char *filter)
 {
+    if (!s_retain) {
+        return;
+    }
     lock();
     for (size_t i = 0; i < MQTT_RETAIN_MAX; ++i) {
         if (!s_retain[i].in_use) {
             continue;
         }
         if (topic_matches_filter(filter, s_retain[i].topic)) {
-            send_publish_packet(sess->sock, s_retain[i].topic, s_retain[i].payload, s_retain[i].qos, true, 0);
+            const char *payload = s_retain[i].payload ? s_retain[i].payload : "";
+            send_publish_packet(sess, s_retain[i].topic, payload, s_retain[i].qos, true, 0);
         }
     }
     unlock();
@@ -647,7 +770,7 @@ static int handle_subscribe(mqtt_session_t *sess, const uint8_t *buf, size_t len
         }
     }
 
-    return send_suback(sess->sock, pid, granted, granted_count);
+    return send_suback(sess, pid, granted, granted_count);
 }
 
 static int handle_publish(mqtt_session_t *sess, uint8_t header, const uint8_t *buf, size_t len)
@@ -826,6 +949,7 @@ static void accept_task(void *param)
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
         lock();
         mqtt_session_t *sess = alloc_session();
+        size_t slot = session_index(sess);
         unlock();
         if (!sess) {
             ESP_LOGW(TAG, "too many clients");
@@ -833,8 +957,28 @@ static void accept_task(void *param)
             closesocket(sock);
             continue;
         }
+        if (slot >= MQTT_MAX_CLIENTS || !ensure_session_task_storage(slot)) {
+            ESP_LOGE(TAG, "no memory for client task");
+            shutdown(sock, SHUT_RDWR);
+            closesocket(sock);
+            lock();
+            free_session(sess);
+            unlock();
+            continue;
+        }
         sess->sock = sock;
-        xTaskCreate(handle_client, "mqtt_client", MQTT_CLIENT_STACK, sess, 5, &sess->task);
+        TaskHandle_t task = xTaskCreateStatic(handle_client, "mqtt_client", MQTT_CLIENT_STACK, sess, 5,
+                                              s_session_stacks[slot], s_session_tcbs[slot]);
+        if (!task) {
+            ESP_LOGE(TAG, "failed to start client task");
+            shutdown(sock, SHUT_RDWR);
+            closesocket(sock);
+            lock();
+            free_session(sess);
+            unlock();
+            continue;
+        }
+        sess->task = task;
     }
 }
 
@@ -842,6 +986,22 @@ esp_err_t mqtt_core_init(void)
 {
     if (!s_lock) {
         s_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_sessions) {
+        s_sessions = heap_caps_calloc(MQTT_MAX_CLIENTS, sizeof(mqtt_session_t),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_sessions) {
+            ESP_LOGE(TAG, "failed to allocate sessions in PSRAM");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (!s_retain) {
+        s_retain = heap_caps_calloc(MQTT_RETAIN_MAX, sizeof(retain_entry_t),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_retain) {
+            ESP_LOGE(TAG, "failed to allocate retain table in PSRAM");
+            return ESP_ERR_NO_MEM;
+        }
     }
     ESP_ERROR_CHECK(event_bus_register_handler(on_event_bus_message));
     return ESP_OK;
@@ -881,7 +1041,20 @@ esp_err_t mqtt_core_start(void)
         esp_timer_create(&args, &s_sweep_timer);
         esp_timer_start_periodic(s_sweep_timer, 10 * 1000 * 1000); // 10s
     }
-    xTaskCreate(accept_task, "mqtt_accept", 4096, NULL, 5, &s_accept_task);
+    if (!ensure_accept_task_storage()) {
+        ESP_LOGE(TAG, "failed to allocate accept task stack");
+        closesocket(s_listen_sock);
+        s_listen_sock = -1;
+        return ESP_ERR_NO_MEM;
+    }
+    s_accept_task = xTaskCreateStatic(accept_task, "mqtt_accept", MQTT_ACCEPT_STACK, NULL, 5,
+                                      s_accept_stack, s_accept_tcb);
+    if (!s_accept_task) {
+        ESP_LOGE(TAG, "failed to create accept task");
+        closesocket(s_listen_sock);
+        s_listen_sock = -1;
+        return ESP_FAIL;
+    }
     ESP_LOGI(TAG, "MQTT broker started on %d", port);
     return ESP_OK;
 }

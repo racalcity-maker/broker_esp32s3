@@ -822,6 +822,7 @@ esp_err_t device_manager_export_json(char **out_json, size_t *out_len)
     feed_wdt();
     dm_unlock();
     esp_err_t err = export_json_from_config(snapshot, out_json, out_len);
+    heap_caps_free(snapshot);
     return err;
 }
 
