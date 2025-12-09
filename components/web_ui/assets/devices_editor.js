@@ -7,6 +7,8 @@
     {value: 'robot', label: 'Robot'},
     {value: 'custom', label: 'Custom'},
   ];
+  const MAX_SCENARIOS_PER_DEVICE = 8;
+  const MAX_STEPS_PER_SCENARIO = 16;
   const DEVICE_IDS = {
     PICTURES: 'pictures_core',
     LASER: 'laser_core',
@@ -316,8 +318,9 @@
     html += renderTabsSection(dev, deviceIdx);
     html += renderTopicsSection(dev, deviceIdx);
     html += '</div>';
+    const canAddScenario = scenarios.length < MAX_SCENARIOS_PER_DEVICE;
     html += '<div class="de-scenario-list">';
-    html += '<div class="de-scenario-actions"><button data-action="add-scenario">Add scenario</button></div>';
+    html += `<div class="de-scenario-actions"><button data-action="add-scenario" ${canAddScenario ? '' : 'disabled title="Scenario limit reached"'}>Add scenario</button></div>`;
     if (!scenarios.length) {
       html += '<div class="de-empty">No scenarios yet.</div>';
     } else {
@@ -343,13 +346,14 @@
   function renderScenarioDetail(scenario, deviceIdx) {
     const idx = state.selectedScenario;
     const scenarioNameClass = buildInputClass(`device.${deviceIdx}.scenario.${idx}.name`);
+    const canAddStep = steps.length < MAX_STEPS_PER_SCENARIO;
     let html = `
       <div class="de-scenario-detail">
         <div class="dw-field"><label>Scenario ID</label><input value="${escapeHtml(scenario.id || '')}" readonly></div>
         <div class="dw-field"><label>Scenario name</label>
           <input class="${scenarioNameClass}" data-scenario-field="name" data-scenario-index="${idx}" value="${escapeHtml(scenario.name || '')}">
         </div>`;
-    html += '<div class="de-step-toolbar"><button data-action="add-step">Add step</button></div>';
+    html += `<div class="de-step-toolbar"><button data-action="add-step" ${canAddStep ? '' : 'disabled title="Step limit reached"'}>Add step</button></div>`;
     const steps = scenario.steps || [];
     if (!steps.length) {
       html += '<div class="de-empty">No steps</div>';
@@ -712,6 +716,10 @@
     const dev = state.devices[state.selectedDevice];
     if (!dev) return;
     dev.scenarios = dev.scenarios || [];
+    if (dev.scenarios.length >= MAX_SCENARIOS_PER_DEVICE) {
+      setStatus(`Device reached ${MAX_SCENARIOS_PER_DEVICE} scenarios`, '#f87171');
+      return;
+    }
     const scenario = createEmptyScenario();
     dev.scenarios.push(scenario);
     state.selectedScenario = dev.scenarios.length - 1;
@@ -772,6 +780,10 @@
     const scen = getCurrentScenario();
     if (!scen) return;
     scen.steps = scen.steps || [];
+    if (scen.steps.length >= MAX_STEPS_PER_SCENARIO) {
+      setStatus(`Scenario reached ${MAX_STEPS_PER_SCENARIO} steps`, '#f87171');
+      return;
+    }
     scen.steps.push(createDefaultStep());
     markDirty();
     renderDeviceDetail();

@@ -104,11 +104,21 @@ static void start_mdns(const char *hostname)
     }
 }
 
+static bool s_sntp_started = false;
+
 static void start_sntp(const char *server)
 {
+    if (!server || !server[0]) {
+        return;
+    }
+    if (s_sntp_started) {
+        sntp_stop();
+        s_sntp_started = false;
+    }
     sntp_setoperatingmode(SNTP_OPMODE_POLL);
     sntp_setservername(0, (char *)server);
     sntp_init();
+    s_sntp_started = true;
     ESP_LOGI(TAG, "SNTP started: %s", server);
 }
 
