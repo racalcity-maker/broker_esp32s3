@@ -204,6 +204,7 @@ Unity prints pass/fail to the serial console. Add more tests by copying the patt
 
 - `docs/SCENARIO_SETUP.md` / `_RUS.md`: hands-on UI instructions for every template.
 - `docs/TEMPLATE_GUIDE.md` / `_RUS.md`: behavioral reference and verification steps.
+- `docs/ARCHITECTURE.md`: system overview, data flow diagram, component responsibilities, and CI notes.
 - `docs/` is the place for future guides (hardware wiring, troubleshooting, etc.).
 
 ---
