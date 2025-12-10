@@ -8,6 +8,8 @@ typedef enum {
     DM_TEMPLATE_TYPE_SIGNAL_HOLD,
     DM_TEMPLATE_TYPE_MQTT_TRIGGER,
     DM_TEMPLATE_TYPE_FLAG_TRIGGER,
+    DM_TEMPLATE_TYPE_IF_CONDITION,
+    DM_TEMPLATE_TYPE_INTERVAL_TASK,
     DM_TEMPLATE_TYPE_COUNT,
 } dm_template_type_t;
 
@@ -25,6 +27,8 @@ typedef struct {
         dm_signal_hold_template_t signal;
         dm_mqtt_trigger_template_t mqtt;
         dm_flag_trigger_template_t flag;
+        dm_condition_template_t condition;
+        dm_interval_task_template_t interval;
     } data;
 } dm_template_config_t;
 

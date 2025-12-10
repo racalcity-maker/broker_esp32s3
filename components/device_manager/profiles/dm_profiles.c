@@ -101,9 +101,9 @@ static esp_err_t write_devices(const char *id, const device_descriptor_t *device
     return ESP_OK;
 }
 
-static esp_err_t read_devices(const char *id, device_descriptor_t *devices, uint8_t *out_count)
+static esp_err_t read_devices(const char *id, device_descriptor_t *devices, uint8_t capacity, uint8_t *out_count)
 {
-    if (!id || !id[0] || !devices || !out_count) {
+    if (!id || !id[0] || !devices || !out_count || capacity == 0) {
         return ESP_ERR_INVALID_ARG;
     }
     char path[DM_PROFILE_PATH_MAX];
@@ -115,7 +115,7 @@ static esp_err_t read_devices(const char *id, device_descriptor_t *devices, uint
     if (!fp) {
         ESP_LOGW(TAG, "profile %s missing", path);
         *out_count = 0;
-        memset(devices, 0, sizeof(device_descriptor_t) * DEVICE_MANAGER_MAX_DEVICES);
+        memset(devices, 0, sizeof(device_descriptor_t) * capacity);
         return ESP_ERR_NOT_FOUND;
     }
     dm_profile_file_header_t hdr = {0};
@@ -125,31 +125,31 @@ static esp_err_t read_devices(const char *id, device_descriptor_t *devices, uint
         ESP_LOGE(TAG, "profile %s invalid header", path);
         fclose(fp);
         *out_count = 0;
-        memset(devices, 0, sizeof(device_descriptor_t) * DEVICE_MANAGER_MAX_DEVICES);
+        memset(devices, 0, sizeof(device_descriptor_t) * capacity);
         return ESP_ERR_INVALID_STATE;
     }
     uint32_t raw_count = hdr.device_count;
-    if (raw_count > DEVICE_MANAGER_MAX_DEVICES) {
+    if (raw_count > capacity) {
         ESP_LOGW(TAG, "profile %s truncated (%" PRIu32 ")", path, raw_count);
-        raw_count = DEVICE_MANAGER_MAX_DEVICES;
+        raw_count = capacity;
     }
     if (raw_count > 0) {
         size_t got = fread(devices, sizeof(device_descriptor_t), raw_count, fp);
         if (got != raw_count) {
             ESP_LOGE(TAG, "profile %s truncated body", path);
             fclose(fp);
-            memset(devices, 0, sizeof(device_descriptor_t) * DEVICE_MANAGER_MAX_DEVICES);
+            memset(devices, 0, sizeof(device_descriptor_t) * capacity);
             *out_count = 0;
             return ESP_ERR_INVALID_SIZE;
         }
     } else {
-        memset(devices, 0, sizeof(device_descriptor_t) * DEVICE_MANAGER_MAX_DEVICES);
+        memset(devices, 0, sizeof(device_descriptor_t) * capacity);
     }
     fclose(fp);
     *out_count = (uint8_t)raw_count;
-    if (raw_count < DEVICE_MANAGER_MAX_DEVICES) {
+    if (raw_count < capacity) {
         memset(&devices[raw_count], 0,
-               sizeof(device_descriptor_t) * (DEVICE_MANAGER_MAX_DEVICES - raw_count));
+               sizeof(device_descriptor_t) * (capacity - raw_count));
     }
     return ESP_OK;
 }
@@ -200,9 +200,9 @@ void dm_profiles_sync_from_active(device_manager_config_t *cfg, bool create_if_m
         return;
     }
     uint8_t count = 0;
-    esp_err_t err = read_devices(profile->id, cfg->devices, &count);
+    esp_err_t err = read_devices(profile->id, cfg->devices, cfg->device_capacity, &count);
     if (err != ESP_OK) {
-        memset(cfg->devices, 0, sizeof(cfg->devices));
+        memset(cfg->devices, 0, sizeof(device_descriptor_t) * cfg->device_capacity);
         cfg->device_count = 0;
         profile->device_count = 0;
         if (create_if_missing && err == ESP_ERR_NOT_FOUND) {
@@ -227,8 +227,8 @@ void dm_profiles_sync_to_active(device_manager_config_t *cfg)
         return;
     }
     uint8_t count = cfg->device_count;
-    if (count > DEVICE_MANAGER_MAX_DEVICES) {
-        count = DEVICE_MANAGER_MAX_DEVICES;
+    if (cfg->device_capacity && count > cfg->device_capacity) {
+        count = cfg->device_capacity;
     }
     profile->device_count = count;
 }
@@ -257,18 +257,21 @@ esp_err_t dm_profiles_store_active(const device_manager_config_t *cfg)
         return ESP_ERR_INVALID_ARG;
     }
     uint8_t count = cfg->device_count;
-    if (count > DEVICE_MANAGER_MAX_DEVICES) {
-        count = DEVICE_MANAGER_MAX_DEVICES;
+    if (count > cfg->device_capacity) {
+        count = cfg->device_capacity;
     }
     return write_devices(cfg->active_profile, cfg->devices, count);
 }
 
-esp_err_t dm_profiles_load_profile(const char *profile_id, device_descriptor_t *devices, uint8_t *device_count)
+esp_err_t dm_profiles_load_profile(const char *profile_id,
+                                   device_descriptor_t *devices,
+                                   uint8_t capacity,
+                                   uint8_t *device_count)
 {
-    if (!profile_id || !profile_id[0] || !devices || !device_count) {
+    if (!profile_id || !profile_id[0] || !devices || !device_count || capacity == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    return read_devices(profile_id, devices, device_count);
+    return read_devices(profile_id, devices, capacity, device_count);
 }
 
 esp_err_t dm_profiles_delete_profile_file(const char *profile_id)

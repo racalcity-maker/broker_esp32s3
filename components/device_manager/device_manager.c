@@ -30,10 +30,107 @@ static const char *CONFIG_BACKUP_PATH = "/sdcard/brocker_devices.json";
 
 static SemaphoreHandle_t s_lock;
 static device_manager_config_t *s_config = NULL;
-static device_manager_config_t *s_work = NULL;
 static bool s_config_ready = false;
-static bool s_cjson_hooks_set = false;
 
+static device_manager_config_t *dm_config_alloc(uint8_t capacity)
+{
+    if (capacity == 0) {
+        return NULL;
+    }
+    size_t bytes = sizeof(device_manager_config_t) + sizeof(device_descriptor_t) * capacity;
+    device_manager_config_t *cfg = heap_caps_calloc(1, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!cfg) {
+        cfg = heap_caps_calloc(1, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (cfg) {
+        cfg->device_capacity = capacity;
+    }
+    return cfg;
+}
+
+static void dm_config_free(device_manager_config_t *cfg)
+{
+    if (cfg) {
+        heap_caps_free(cfg);
+    }
+}
+
+static size_t dm_config_device_bytes(const device_manager_config_t *cfg, uint8_t slots)
+{
+    if (!cfg || slots == 0) {
+        return 0;
+    }
+    return sizeof(device_descriptor_t) * slots;
+}
+
+static void dm_config_clone(device_manager_config_t *dest, const device_manager_config_t *src)
+{
+    if (!dest || !src) {
+        return;
+    }
+    uint8_t dest_cap = dest->device_capacity ? dest->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    uint8_t src_cap = src->device_capacity ? src->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    uint8_t src_used = src->device_count;
+    if (src_used > src_cap) {
+        src_used = src_cap;
+    }
+    uint8_t copy_slots = (dest_cap < src_used) ? dest_cap : src_used;
+    size_t meta = sizeof(device_manager_config_t);
+    size_t device_bytes = dm_config_device_bytes(src, copy_slots);
+    ESP_LOGI(TAG, "dm_copy size=%zu, psram_free=%u, internal_free=%u",
+             meta + device_bytes,
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    const size_t chunk = 512;
+    size_t offset = 0;
+    uint8_t *dst_bytes = (uint8_t *)dest;
+    const uint8_t *src_bytes = (const uint8_t *)src;
+    while (offset < meta) {
+        size_t part = chunk;
+        if (part > meta - offset) {
+            part = meta - offset;
+        }
+        memcpy(dst_bytes + offset, src_bytes + offset, part);
+        offset += part;
+        feed_wdt();
+    }
+    dest->device_capacity = dest_cap;
+    uint8_t *dst_devices = (uint8_t *)dest->devices;
+    const uint8_t *src_devices = (const uint8_t *)src->devices;
+    offset = 0;
+    while (offset < device_bytes) {
+        size_t part = chunk;
+        if (part > device_bytes - offset) {
+            part = device_bytes - offset;
+        }
+        memcpy(dst_devices + offset, src_devices + offset, part);
+        offset += part;
+        feed_wdt();
+    }
+    if (dest_cap > copy_slots) {
+        size_t remaining_bytes = dm_config_device_bytes(dest, dest_cap - copy_slots);
+        memset(dst_devices + device_bytes, 0, remaining_bytes);
+    }
+    if (dest->device_count > dest_cap) {
+        dest->device_count = dest_cap;
+    }
+}
+
+static void *dm_cjson_malloc(size_t size);
+static void dm_cjson_free(void *ptr);
+void dm_cjson_install_hooks(void)
+{
+    cJSON_Hooks hooks = {
+        .malloc_fn = dm_cjson_malloc,
+        .free_fn = dm_cjson_free,
+    };
+    cJSON_InitHooks(&hooks);
+}
+
+void dm_cjson_reset_hooks(void)
+{
+    cJSON_InitHooks(NULL);
+}
 static void *dm_cjson_malloc(size_t size)
 {
     void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -50,47 +147,10 @@ static void dm_cjson_free(void *ptr)
     }
 }
 
-static void dm_init_cjson_hooks(void)
-{
-    if (s_cjson_hooks_set) {
-        return;
-    }
-    cJSON_Hooks hooks = {
-        .malloc_fn = dm_cjson_malloc,
-        .free_fn = dm_cjson_free,
-    };
-    cJSON_InitHooks(&hooks);
-    s_cjson_hooks_set = true;
-}
-
 static void register_templates_from_config(device_manager_config_t *cfg);
 
 
 
-
-static void dm_copy(void *dest, const void *src, size_t len)
-{
-    if (!dest || !src || len == 0) {
-        return;
-    }
-    ESP_LOGI(TAG, "dm_copy size=%zu, psram_free=%u, internal_free=%u",
-             len,
-             heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    uint8_t *d = (uint8_t *)dest;
-    const uint8_t *s = (const uint8_t *)src;
-    const size_t chunk = 512;
-    size_t offset = 0;
-    while (offset < len) {
-        size_t part = chunk;
-        if (part > len - offset) {
-            part = len - offset;
-        }
-        memcpy(d + offset, s + offset, part);
-        offset += part;
-        feed_wdt();
-    }
-}
 
 static void dm_lock(void)
 {
@@ -115,7 +175,8 @@ static void register_templates_from_config(device_manager_config_t *cfg)
         return;
     }
     dm_template_runtime_reset();
-    for (uint8_t i = 0; i < cfg->device_count && i < DEVICE_MANAGER_MAX_DEVICES; ++i) {
+    uint8_t limit = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    for (uint8_t i = 0; i < cfg->device_count && i < limit; ++i) {
         device_descriptor_t *dev = &cfg->devices[i];
         if (dev->template_assigned) {
             esp_err_t err = dm_template_runtime_register(&dev->template_config, dev->id);
@@ -133,50 +194,37 @@ esp_err_t device_manager_init(void)
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     ESP_LOGI(TAG, "device_manager_init start");
-    dm_init_cjson_hooks();
     if (!s_lock) { s_lock = xSemaphoreCreateMutex(); }
     if (s_config_ready) {
         ESP_LOGI(TAG, "device_manager already initialized");
         return ESP_OK;
     }
     if (!s_config) {
-        size_t total = sizeof(device_manager_config_t);
-        ESP_LOGI(TAG, "allocating config buffer (%zu bytes)", total);
-        s_config = heap_caps_calloc(1, total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_config) {
-            s_config = calloc(1, total);
-        }
+        s_config = dm_config_alloc(DEVICE_MANAGER_MAX_DEVICES);
         ESP_RETURN_ON_FALSE(s_config != NULL, ESP_ERR_NO_MEM, TAG, "alloc config failed");
+        ESP_LOGI(TAG, "allocating config buffer (%zu bytes)",
+                 sizeof(device_manager_config_t) +
+                     dm_config_device_bytes(s_config, s_config->device_capacity));
     }
     ESP_LOGI(TAG, "loading defaults to config buffer");
     dm_load_defaults(s_config);
     feed_wdt();
-    if (!s_work) {
-        size_t total = sizeof(device_manager_config_t);
-        ESP_LOGI(TAG, "allocating staging buffer (%zu bytes)", total);
-        s_work = heap_caps_calloc(1, total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_work) {
-            s_work = calloc(1, total);
-        }
-        if (!s_work) {
-            ESP_LOGW(TAG, "no memory for staging buffer, will allocate on demand");
-        }
-    }
-
-    device_manager_config_t *temp = heap_caps_calloc(1, sizeof(*temp), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    device_manager_config_t *temp = dm_config_alloc(DEVICE_MANAGER_MAX_DEVICES);
     if (!temp) {
         ESP_LOGE(TAG, "no memory for temp config");
         return ESP_ERR_NO_MEM;
     }
     feed_wdt();
-    ESP_LOGI(TAG, "Expected cfg size=%zu", sizeof(*temp));
+    ESP_LOGI(TAG, "Expected cfg size=%zu",
+             sizeof(device_manager_config_t) +
+                 dm_config_device_bytes(temp, temp->device_capacity));
     ESP_LOGI(TAG, "loading config from %s", CONFIG_BACKUP_PATH);
     esp_err_t load_err = dm_storage_load(CONFIG_BACKUP_PATH, temp);
     feed_wdt();
     if (load_err == ESP_OK) {
         dm_lock();
         feed_wdt();
-        dm_copy(s_config, temp, sizeof(*temp));
+        dm_config_clone(s_config, temp);
         s_config->generation++;
         dm_unlock();
         ESP_LOGI(TAG, "device config loaded from file");
@@ -188,7 +236,7 @@ esp_err_t device_manager_init(void)
         ESP_ERROR_CHECK_WITHOUT_ABORT(dm_storage_save(CONFIG_BACKUP_PATH, s_config));
         dm_unlock();
     }
-    free(temp);
+    dm_config_free(temp);
     dm_profiles_sync_from_active(s_config, true);
     dm_profiles_sync_to_active(s_config);
     s_config_ready = true;
@@ -207,9 +255,15 @@ esp_err_t device_manager_init(void)
     return ESP_OK;
 }
 
-const device_manager_config_t *device_manager_get(void)
+const device_manager_config_t *device_manager_lock_config(void)
 {
+    dm_lock();
     return s_config;
+}
+
+void device_manager_unlock_config(void)
+{
+    dm_unlock();
 }
 
 esp_err_t device_manager_reload_from_nvs(void)
@@ -217,7 +271,7 @@ esp_err_t device_manager_reload_from_nvs(void)
     if (!s_config_ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    device_manager_config_t *temp = heap_caps_calloc(1, sizeof(*temp), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    device_manager_config_t *temp = dm_config_alloc(DEVICE_MANAGER_MAX_DEVICES);
     if (!temp) {
         return ESP_ERR_NO_MEM;
     }
@@ -225,33 +279,26 @@ esp_err_t device_manager_reload_from_nvs(void)
     esp_err_t err = dm_storage_load(CONFIG_BACKUP_PATH, temp);
     feed_wdt();
     if (err != ESP_OK) {
-        free(temp);
+        dm_config_free(temp);
         return err;
     }
     dm_lock();
     feed_wdt();
-    dm_copy(s_config, temp, sizeof(*temp));
+    dm_config_clone(s_config, temp);
     s_config->generation++;
     dm_profiles_sync_from_active(s_config, true);
     dm_profiles_sync_to_active(s_config);
     feed_wdt();
     dm_unlock();
-    free(temp);
+    dm_config_free(temp);
     register_templates_from_config(s_config);
     return ESP_OK;
 }
 
 static esp_err_t persist_locked(void)
 {
-    device_manager_config_t *snapshot = s_work;
-    bool temp_alloc = false;
-    if (!snapshot) {
-        snapshot = heap_caps_calloc(1, sizeof(*snapshot), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!snapshot) {
-            snapshot = calloc(1, sizeof(*snapshot));
-        }
-        temp_alloc = true;
-    }
+    uint8_t cap = s_config ? s_config->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    device_manager_config_t *snapshot = dm_config_alloc(cap);
     if (!snapshot) {
         return ESP_ERR_NO_MEM;
     }
@@ -259,21 +306,13 @@ static esp_err_t persist_locked(void)
     dm_profiles_sync_to_active(s_config);
     esp_err_t profile_err = dm_profiles_store_active(s_config);
     if (profile_err != ESP_OK) {
-        if (temp_alloc) {
-            free(snapshot);
-        } else {
-            memset(snapshot, 0, sizeof(*snapshot));
-        }
+        dm_config_free(snapshot);
         return profile_err;
     }
-    dm_copy(snapshot, s_config, sizeof(*snapshot));
+    dm_config_clone(snapshot, s_config);
     feed_wdt();
     esp_err_t err = dm_storage_save(CONFIG_BACKUP_PATH, snapshot);
-    if (temp_alloc) {
-        free(snapshot);
-    } else {
-        memset(snapshot, 0, sizeof(*snapshot));
-    }
+    dm_config_free(snapshot);
     return err;
 }
 
@@ -298,8 +337,7 @@ esp_err_t device_manager_apply(const device_manager_config_t *next)
     }
     dm_lock();
     feed_wdt();
-    vTaskDelay(1);
-    dm_copy(s_config, next, sizeof(*next));
+    dm_config_clone(s_config, next);
     feed_wdt();
     s_config->generation++;
     dm_profiles_sync_to_active(s_config);
@@ -320,15 +358,8 @@ esp_err_t device_manager_sync_file(void)
     if (!s_config_ready) {
         return ESP_ERR_INVALID_STATE;
     }
-    device_manager_config_t *snapshot = s_work;
-    bool temp_alloc = false;
-    if (!snapshot) {
-        snapshot = heap_caps_calloc(1, sizeof(*snapshot), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!snapshot) {
-            snapshot = calloc(1, sizeof(*snapshot));
-        }
-        temp_alloc = true;
-    }
+    uint8_t cap = s_config ? s_config->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    device_manager_config_t *snapshot = dm_config_alloc(cap);
     if (!snapshot) {
         return ESP_ERR_NO_MEM;
     }
@@ -337,21 +368,13 @@ esp_err_t device_manager_sync_file(void)
     esp_err_t profile_err = dm_profiles_store_active(s_config);
     if (profile_err != ESP_OK) {
         dm_unlock();
-        if (temp_alloc) {
-            free(snapshot);
-        } else {
-            memset(snapshot, 0, sizeof(*snapshot));
-        }
+        dm_config_free(snapshot);
         return profile_err;
     }
-    dm_copy(snapshot, s_config, sizeof(*snapshot));
+    dm_config_clone(snapshot, s_config);
     dm_unlock();
     esp_err_t err = dm_storage_save(CONFIG_BACKUP_PATH, snapshot);
-    if (temp_alloc) {
-        free(snapshot);
-    } else {
-        memset(snapshot, 0, sizeof(*snapshot));
-    }
+    dm_config_free(snapshot);
     return err;
 }
 
@@ -372,21 +395,14 @@ esp_err_t device_manager_export_profile_json(const char *profile_id, char **out_
     if (out_len) {
         *out_len = 0;
     }
-    device_manager_config_t *snapshot = s_work;
-    bool temp_alloc = false;
-    if (!snapshot) {
-        snapshot = heap_caps_calloc(1, sizeof(*snapshot), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!snapshot) {
-            snapshot = calloc(1, sizeof(*snapshot));
-        }
-        temp_alloc = true;
-    }
+    uint8_t cap = s_config ? s_config->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    device_manager_config_t *snapshot = dm_config_alloc(cap);
     if (!snapshot) {
         return ESP_ERR_NO_MEM;
     }
     dm_lock();
     feed_wdt();
-    dm_copy(snapshot, s_config, sizeof(*snapshot));
+    dm_config_clone(snapshot, s_config);
     feed_wdt();
     dm_unlock();
     if (profile_id && profile_id[0]) {
@@ -395,11 +411,7 @@ esp_err_t device_manager_export_profile_json(const char *profile_id, char **out_
     dm_profiles_ensure_active(snapshot);
     dm_profiles_sync_from_active(snapshot, false);
     esp_err_t err = dm_storage_export_json(snapshot, out_json, out_len);
-    if (temp_alloc) {
-        free(snapshot);
-    } else {
-        memset(snapshot, 0, sizeof(*snapshot));
-    }
+    dm_config_free(snapshot);
     return err;
 }
 
@@ -412,15 +424,8 @@ esp_err_t device_manager_apply_profile_json(const char *profile_id, const char *
     if (!root) {
         return ESP_ERR_INVALID_ARG;
     }
-    device_manager_config_t *next = s_work;
-    bool temp_alloc = false;
-    if (!next) {
-        next = heap_caps_calloc(1, sizeof(*next), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!next) {
-            next = calloc(1, sizeof(*next));
-        }
-        temp_alloc = true;
-    }
+    uint8_t cap = s_config ? s_config->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    device_manager_config_t *next = dm_config_alloc(cap);
     if (!next) {
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
@@ -428,9 +433,7 @@ esp_err_t device_manager_apply_profile_json(const char *profile_id, const char *
     bool ok = dm_populate_config_from_json(next, root);
     cJSON_Delete(root);
     if (!ok) {
-        if (temp_alloc) {
-            free(next);
-        }
+        dm_config_free(next);
         return ESP_ERR_INVALID_ARG;
     }
     if (profile_id && profile_id[0]) {
@@ -438,11 +441,7 @@ esp_err_t device_manager_apply_profile_json(const char *profile_id, const char *
     }
     feed_wdt();
     esp_err_t err = device_manager_apply(next);
-    if (temp_alloc) {
-        free(next);
-    } else {
-        memset(next, 0, sizeof(*next));
-    }
+    dm_config_free(next);
     return err;
 }
 
@@ -468,7 +467,10 @@ esp_err_t device_manager_profile_create(const char *id, const char *name, const 
         const device_manager_profile_t *clone_profile = dm_profiles_find_by_id(s_config, clone_id);
         if (clone_profile) {
             uint8_t cloned_count = 0;
-            esp_err_t clone_err = dm_profiles_load_profile(clone_profile->id, s_config->devices, &cloned_count);
+            esp_err_t clone_err = dm_profiles_load_profile(clone_profile->id,
+                                                           s_config->devices,
+                                                           s_config->device_capacity,
+                                                           &cloned_count);
             if (clone_err != ESP_OK) {
                 dm_unlock();
                 return clone_err;

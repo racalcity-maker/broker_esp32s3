@@ -59,6 +59,10 @@ function renderTemplateSection(dev) {
     body = renderMqttTemplate(dev);
   } else if (tplType === 'on_flag') {
     body = renderFlagTemplate(dev);
+  } else if (tplType === 'if_condition') {
+    body = renderConditionTemplate(dev);
+  } else if (tplType === 'interval_task') {
+    body = renderIntervalTemplate(dev);
   }
   return `
     <div class="dw-section">
@@ -180,6 +184,57 @@ function renderFlagTemplate(dev) {
       </div>
       ${rules || "<div class='dw-empty small'>No rules configured.</div>"}
       <div class="dw-hint small">Scenarios must exist on this device and will run when the selected flag changes.</div>
+    </div>`;
+}
+
+function renderConditionTemplate(dev) {
+  ensureConditionTemplate(dev);
+  const tpl = dev.template?.condition || {};
+  const rules = (tpl.rules || []).map((rule, idx) => `
+    <div class="dw-slot">
+      <div class="dw-slot-head">Condition ${idx + 1}<button class="danger small" data-action="condition-rule-remove" data-index="${idx}">&times;</button></div>
+      <div class="dw-field"><label>Flag</label><input data-template-field="condition-rule" data-subfield="flag" data-index="${idx}" value="${escapeAttr(rule.flag || '')}" placeholder="flag_name"></div>
+      <div class="dw-field">
+        <label>State</label>
+        <select data-template-field="condition-rule" data-subfield="state" data-index="${idx}">
+          <option value="true" ${rule.required_state ? 'selected' : ''}>TRUE</option>
+          <option value="false" ${!rule.required_state ? 'selected' : ''}>FALSE</option>
+        </select>
+      </div>
+    </div>`).join('');
+  return `
+    <div class="dw-section">
+      <div class="dw-section-head"><span>Condition settings</span></div>
+      <div class="dw-field">
+        <label>Logic mode</label>
+        <select data-template-field="condition-mode">
+          <option value="all" ${tpl.mode === 'all' ? 'selected' : ''}>All conditions</option>
+          <option value="any" ${tpl.mode === 'any' ? 'selected' : ''}>Any condition</option>
+        </select>
+      </div>
+      <div class="dw-field"><label>Scenario if TRUE</label><input data-template-field="condition-scenario" data-subfield="true" value="${escapeAttr(tpl.true_scenario || '')}" placeholder="scenario_true"></div>
+      <div class="dw-field"><label>Scenario if FALSE</label><input data-template-field="condition-scenario" data-subfield="false" value="${escapeAttr(tpl.false_scenario || '')}" placeholder="scenario_false"></div>
+    </div>
+    <div class="dw-section">
+      <div class="dw-section-head">
+        <span>Conditions</span>
+        <button data-action="condition-rule-add">Add condition</button>
+      </div>
+      ${rules || "<div class='dw-empty small'>No conditions configured.</div>"}
+      <div class="dw-hint small">Conditions evaluate automation flags; scenarios run when result changes.</div>
+    </div>`;
+}
+
+function renderIntervalTemplate(dev) {
+  ensureIntervalTemplate(dev);
+  const tpl = dev.template?.interval || {};
+  const intervalMs = (tpl.interval_ms && tpl.interval_ms > 0) ? tpl.interval_ms : 1000;
+  return `
+    <div class="dw-section">
+      <div class="dw-section-head"><span>Interval task</span></div>
+      <div class="dw-field"><label>Interval (ms)</label><input type="number" min="1" data-template-field="interval" data-subfield="interval_ms" value="${intervalMs}"></div>
+      <div class="dw-field"><label>Scenario ID</label><input data-template-field="interval" data-subfield="scenario" value="${escapeAttr(tpl.scenario || '')}" placeholder="scenario_id"></div>
+      <div class="dw-hint small">Runs the selected scenario on a fixed interval.</div>
     </div>`;
 }
 

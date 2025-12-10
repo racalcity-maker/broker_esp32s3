@@ -12,6 +12,8 @@ extern "C" {
 
 bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *root);
 void dm_load_defaults(device_manager_config_t *cfg);
+void dm_cjson_install_hooks(void);
+void dm_cjson_reset_hooks(void);
 
 const char *dm_condition_to_string(device_condition_type_t cond);
 bool dm_condition_from_string(const char *name, device_condition_type_t *out);

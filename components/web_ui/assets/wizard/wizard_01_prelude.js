@@ -10,6 +10,8 @@ const TEMPLATE_TYPES = [
   {value: 'signal_hold', label: 'Signal hold'},
   {value: 'on_mqtt_event', label: 'MQTT trigger'},
   {value: 'on_flag', label: 'Flag trigger'},
+  {value: 'if_condition', label: 'Conditional scenario'},
+  {value: 'interval_task', label: 'Interval task'},
 ];
 const MQTT_RULE_LIMIT = 8;
 const FLAG_RULE_LIMIT = 8;
@@ -193,6 +195,8 @@ function handleDetailClick(ev) {
     case 'mqtt-rule-remove': removeMqttRule(btn.dataset.index); break;
     case 'flag-rule-add': addFlagRule(); break;
     case 'flag-rule-remove': removeFlagRule(btn.dataset.index); break;
+    case 'condition-rule-add': addConditionRule(); break;
+    case 'condition-rule-remove': removeConditionRule(btn.dataset.index); break;
   }
 }
 

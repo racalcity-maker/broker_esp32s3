@@ -10,16 +10,20 @@
 #include "dm_runtime_signal.h"
 #include "dm_runtime_mqtt.h"
 #include "dm_runtime_flag.h"
+#include "dm_runtime_condition.h"
+#include "dm_runtime_interval.h"
 #include "device_manager_utils.h"
 #include "audio_player.h"
 #include "automation_engine.h"
 #include "event_bus.h"
 #include "mqtt_core.h"
 
-#define DM_UID_RUNTIME_MAX      4
-#define DM_SIGNAL_RUNTIME_MAX   4
-#define DM_MQTT_RUNTIME_MAX     6
-#define DM_FLAG_RUNTIME_MAX     6
+#define DM_UID_RUNTIME_MAX       4
+#define DM_SIGNAL_RUNTIME_MAX    4
+#define DM_MQTT_RUNTIME_MAX      6
+#define DM_FLAG_RUNTIME_MAX      6
+#define DM_CONDITION_RUNTIME_MAX 6
+#define DM_INTERVAL_RUNTIME_MAX  6
 
 static const char *TAG = "template_runtime";
 
@@ -57,6 +61,21 @@ typedef struct {
 
 static mqtt_runtime_entry_t s_mqtt_entries[DM_MQTT_RUNTIME_MAX];
 static flag_runtime_entry_t s_flag_entries[DM_FLAG_RUNTIME_MAX];
+typedef struct {
+    bool in_use;
+    char device_id[DEVICE_MANAGER_ID_MAX_LEN];
+    dm_condition_runtime_t runtime;
+} condition_runtime_entry_t;
+
+typedef struct {
+    bool in_use;
+    char device_id[DEVICE_MANAGER_ID_MAX_LEN];
+    dm_interval_task_runtime_t runtime;
+    esp_timer_handle_t timer;
+} interval_runtime_entry_t;
+
+static condition_runtime_entry_t s_condition_entries[DM_CONDITION_RUNTIME_MAX];
+static interval_runtime_entry_t s_interval_entries[DM_INTERVAL_RUNTIME_MAX];
 static bool s_event_handler_registered = false;
 
 static bool payload_to_bool(const char *payload)
@@ -137,6 +156,39 @@ static flag_runtime_entry_t *allocate_flag_entry(void)
     return NULL;
 }
 
+static condition_runtime_entry_t *allocate_condition_entry(void)
+{
+    for (size_t i = 0; i < DM_CONDITION_RUNTIME_MAX; ++i) {
+        if (!s_condition_entries[i].in_use) {
+            return &s_condition_entries[i];
+        }
+    }
+    return NULL;
+}
+
+static interval_runtime_entry_t *allocate_interval_entry(void)
+{
+    for (size_t i = 0; i < DM_INTERVAL_RUNTIME_MAX; ++i) {
+        if (!s_interval_entries[i].in_use) {
+            return &s_interval_entries[i];
+        }
+    }
+    return NULL;
+}
+
+static void reset_interval_entries(void)
+{
+    for (size_t i = 0; i < DM_INTERVAL_RUNTIME_MAX; ++i) {
+        interval_runtime_entry_t *entry = &s_interval_entries[i];
+        if (entry->timer) {
+            esp_timer_stop(entry->timer);
+            esp_timer_delete(entry->timer);
+            entry->timer = NULL;
+        }
+        memset(entry, 0, sizeof(*entry));
+    }
+}
+
 static const char *uid_event_str(dm_uid_event_type_t type)
 {
     switch (type) {
@@ -159,6 +211,8 @@ esp_err_t dm_template_runtime_init(void)
     memset(s_signal_entries, 0, sizeof(s_signal_entries));
     memset(s_mqtt_entries, 0, sizeof(s_mqtt_entries));
     memset(s_flag_entries, 0, sizeof(s_flag_entries));
+    memset(s_condition_entries, 0, sizeof(s_condition_entries));
+    reset_interval_entries();
     if (!s_event_handler_registered) {
         esp_err_t err = event_bus_register_handler(template_event_handler);
         if (err != ESP_OK) {
@@ -255,6 +309,88 @@ static esp_err_t register_flag_runtime(const dm_flag_trigger_template_t *tpl, co
     return ESP_OK;
 }
 
+static esp_err_t register_condition_runtime(const dm_condition_template_t *tpl, const char *device_id)
+{
+    if (!tpl || tpl->rule_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    condition_runtime_entry_t *entry = allocate_condition_entry();
+    if (!entry) {
+        ESP_LOGE(TAG, "no slot for condition runtime");
+        return ESP_ERR_NO_MEM;
+    }
+    memset(entry, 0, sizeof(*entry));
+    entry->in_use = true;
+    dm_str_copy(entry->device_id, sizeof(entry->device_id), device_id);
+    dm_condition_runtime_init(&entry->runtime, tpl);
+    ESP_LOGI(TAG, "registered condition runtime for %s (%u rules)", entry->device_id, tpl->rule_count);
+    return ESP_OK;
+}
+
+static void interval_timer_callback(void *arg)
+{
+    interval_runtime_entry_t *entry = (interval_runtime_entry_t *)arg;
+    if (!entry || !entry->in_use) {
+        return;
+    }
+    const char *scenario = entry->runtime.config.scenario;
+    if (!scenario[0]) {
+        return;
+    }
+    esp_err_t err = automation_engine_trigger(entry->device_id, scenario);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "interval trigger %s/%s failed: %s",
+                 entry->device_id,
+                 scenario,
+                 esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "[Interval] dev=%s scenario=%s", entry->device_id, scenario);
+    }
+}
+
+static esp_err_t register_interval_runtime(const dm_interval_task_template_t *tpl, const char *device_id)
+{
+    if (!tpl || tpl->interval_ms == 0 || !tpl->scenario[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    interval_runtime_entry_t *entry = allocate_interval_entry();
+    if (!entry) {
+        ESP_LOGE(TAG, "no slot for interval runtime");
+        return ESP_ERR_NO_MEM;
+    }
+    memset(entry, 0, sizeof(*entry));
+    entry->in_use = true;
+    dm_str_copy(entry->device_id, sizeof(entry->device_id), device_id);
+    dm_interval_task_runtime_init(&entry->runtime, tpl);
+    esp_timer_create_args_t args = {
+        .callback = interval_timer_callback,
+        .arg = entry,
+        .name = "dm_interval",
+        .dispatch_method = ESP_TIMER_TASK,
+    };
+    esp_err_t err = esp_timer_create(&args, &entry->timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "interval timer create failed: %s", esp_err_to_name(err));
+        memset(entry, 0, sizeof(*entry));
+        return err;
+    }
+    uint64_t interval_us = (uint64_t)entry->runtime.config.interval_ms * 1000ULL;
+    if (interval_us < 1000ULL) {
+        interval_us = 1000ULL;
+    }
+    err = esp_timer_start_periodic(entry->timer, interval_us);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "interval timer start failed: %s", esp_err_to_name(err));
+        esp_timer_delete(entry->timer);
+        memset(entry, 0, sizeof(*entry));
+        return err;
+    }
+    ESP_LOGI(TAG, "registered interval runtime for %s every %u ms",
+             entry->device_id,
+             (unsigned)entry->runtime.config.interval_ms);
+    return ESP_OK;
+}
+
 esp_err_t dm_template_runtime_register(const dm_template_config_t *tpl, const char *device_id)
 {
     if (!tpl || !device_id) {
@@ -269,6 +405,10 @@ esp_err_t dm_template_runtime_register(const dm_template_config_t *tpl, const ch
         return register_mqtt_runtime(&tpl->data.mqtt, device_id);
     case DM_TEMPLATE_TYPE_FLAG_TRIGGER:
         return register_flag_runtime(&tpl->data.flag, device_id);
+    case DM_TEMPLATE_TYPE_IF_CONDITION:
+        return register_condition_runtime(&tpl->data.condition, device_id);
+    case DM_TEMPLATE_TYPE_INTERVAL_TASK:
+        return register_interval_runtime(&tpl->data.interval, device_id);
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -527,6 +667,31 @@ bool dm_template_runtime_handle_flag(const char *flag_name, bool state)
                      entry->device_id,
                      rule->scenario,
                      esp_err_to_name(err));
+        }
+    }
+    for (size_t i = 0; i < DM_CONDITION_RUNTIME_MAX; ++i) {
+        condition_runtime_entry_t *entry = &s_condition_entries[i];
+        if (!entry->in_use) {
+            continue;
+        }
+        bool changed = false;
+        bool result = false;
+        if (dm_condition_runtime_handle_flag(&entry->runtime, flag_name, state, &changed, &result)) {
+            handled = true;
+            if (!changed) {
+                continue;
+            }
+            const char *scenario = result ? entry->runtime.config.true_scenario
+                                          : entry->runtime.config.false_scenario;
+            if (scenario[0]) {
+                esp_err_t err = automation_engine_trigger(entry->device_id, scenario);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "if_condition trigger %s/%s failed: %s",
+                             entry->device_id,
+                             scenario,
+                             esp_err_to_name(err));
+                }
+            }
         }
     }
     return handled;

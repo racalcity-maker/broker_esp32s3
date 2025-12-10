@@ -10,6 +10,8 @@ const TEMPLATE_TYPES = [
   {value: 'signal_hold', label: 'Signal hold'},
   {value: 'on_mqtt_event', label: 'MQTT trigger'},
   {value: 'on_flag', label: 'Flag trigger'},
+  {value: 'if_condition', label: 'Conditional scenario'},
+  {value: 'interval_task', label: 'Interval task'},
 ];
 const MQTT_RULE_LIMIT = 8;
 const FLAG_RULE_LIMIT = 8;
@@ -193,6 +195,8 @@ function handleDetailClick(ev) {
     case 'mqtt-rule-remove': removeMqttRule(btn.dataset.index); break;
     case 'flag-rule-add': addFlagRule(); break;
     case 'flag-rule-remove': removeFlagRule(btn.dataset.index); break;
+    case 'condition-rule-add': addConditionRule(); break;
+    case 'condition-rule-remove': removeConditionRule(btn.dataset.index); break;
   }
 }
 
@@ -382,6 +386,10 @@ function renderTemplateSection(dev) {
     body = renderMqttTemplate(dev);
   } else if (tplType === 'on_flag') {
     body = renderFlagTemplate(dev);
+  } else if (tplType === 'if_condition') {
+    body = renderConditionTemplate(dev);
+  } else if (tplType === 'interval_task') {
+    body = renderIntervalTemplate(dev);
   }
   return `
     <div class="dw-section">
@@ -503,6 +511,57 @@ function renderFlagTemplate(dev) {
       </div>
       ${rules || "<div class='dw-empty small'>No rules configured.</div>"}
       <div class="dw-hint small">Scenarios must exist on this device and will run when the selected flag changes.</div>
+    </div>`;
+}
+
+function renderConditionTemplate(dev) {
+  ensureConditionTemplate(dev);
+  const tpl = dev.template?.condition || {};
+  const rules = (tpl.rules || []).map((rule, idx) => `
+    <div class="dw-slot">
+      <div class="dw-slot-head">Condition ${idx + 1}<button class="danger small" data-action="condition-rule-remove" data-index="${idx}">&times;</button></div>
+      <div class="dw-field"><label>Flag</label><input data-template-field="condition-rule" data-subfield="flag" data-index="${idx}" value="${escapeAttr(rule.flag || '')}" placeholder="flag_name"></div>
+      <div class="dw-field">
+        <label>State</label>
+        <select data-template-field="condition-rule" data-subfield="state" data-index="${idx}">
+          <option value="true" ${rule.required_state ? 'selected' : ''}>TRUE</option>
+          <option value="false" ${!rule.required_state ? 'selected' : ''}>FALSE</option>
+        </select>
+      </div>
+    </div>`).join('');
+  return `
+    <div class="dw-section">
+      <div class="dw-section-head"><span>Condition settings</span></div>
+      <div class="dw-field">
+        <label>Logic mode</label>
+        <select data-template-field="condition-mode">
+          <option value="all" ${tpl.mode === 'all' ? 'selected' : ''}>All conditions</option>
+          <option value="any" ${tpl.mode === 'any' ? 'selected' : ''}>Any condition</option>
+        </select>
+      </div>
+      <div class="dw-field"><label>Scenario if TRUE</label><input data-template-field="condition-scenario" data-subfield="true" value="${escapeAttr(tpl.true_scenario || '')}" placeholder="scenario_true"></div>
+      <div class="dw-field"><label>Scenario if FALSE</label><input data-template-field="condition-scenario" data-subfield="false" value="${escapeAttr(tpl.false_scenario || '')}" placeholder="scenario_false"></div>
+    </div>
+    <div class="dw-section">
+      <div class="dw-section-head">
+        <span>Conditions</span>
+        <button data-action="condition-rule-add">Add condition</button>
+      </div>
+      ${rules || "<div class='dw-empty small'>No conditions configured.</div>"}
+      <div class="dw-hint small">Conditions evaluate automation flags; scenarios run when result changes.</div>
+    </div>`;
+}
+
+function renderIntervalTemplate(dev) {
+  ensureIntervalTemplate(dev);
+  const tpl = dev.template?.interval || {};
+  const intervalMs = (tpl.interval_ms && tpl.interval_ms > 0) ? tpl.interval_ms : 1000;
+  return `
+    <div class="dw-section">
+      <div class="dw-section-head"><span>Interval task</span></div>
+      <div class="dw-field"><label>Interval (ms)</label><input type="number" min="1" data-template-field="interval" data-subfield="interval_ms" value="${intervalMs}"></div>
+      <div class="dw-field"><label>Scenario ID</label><input data-template-field="interval" data-subfield="scenario" value="${escapeAttr(tpl.scenario || '')}" placeholder="scenario_id"></div>
+      <div class="dw-hint small">Runs the selected scenario on a fixed interval.</div>
     </div>`;
 }
 
@@ -822,6 +881,51 @@ function updateTemplateField(el) {
       }
       break;
     }
+    case 'condition-mode': {
+      ensureConditionTemplate(dev);
+      if (!dev.template?.condition) return;
+      dev.template.condition.mode = el.value === 'any' ? 'any' : 'all';
+      break;
+    }
+    case 'condition-scenario': {
+      ensureConditionTemplate(dev);
+      if (!dev.template?.condition) return;
+      const sub = el.dataset.subfield;
+      if (sub === 'true') {
+        dev.template.condition.true_scenario = el.value;
+      } else if (sub === 'false') {
+        dev.template.condition.false_scenario = el.value;
+      }
+      break;
+    }
+    case 'condition-rule': {
+      ensureConditionTemplate(dev);
+      const tpl = dev.template?.condition;
+      if (!tpl) return;
+      const idx = parseInt(el.dataset.index, 10);
+      if (Number.isNaN(idx) || !tpl.rules[idx]) return;
+      const sub = el.dataset.subfield;
+      if (sub === 'state') {
+        tpl.rules[idx].required_state = el.value === 'true';
+      } else {
+        tpl.rules[idx][sub] = el.value;
+      }
+      break;
+    }
+    case 'interval': {
+      ensureIntervalTemplate(dev);
+      if (!dev.template?.interval) return;
+      const sub = el.dataset.subfield;
+      if (sub === 'interval_ms') {
+        const val = parseInt(el.value, 10);
+        const next = Number.isNaN(val) ? 1000 : Math.max(val, 1);
+        dev.template.interval.interval_ms = next;
+        el.value = next;
+      } else if (sub === 'scenario') {
+        dev.template.interval.scenario = el.value;
+      }
+      break;
+    }
     default:
       return;
   }
@@ -879,7 +983,7 @@ function updateWaitField(stepIdxStr, reqIdxStr, field, el) {
 function setDeviceTemplate(dev, type) {
   if (!dev) return;
   let nextType = type || '';
-  const allowed = ['uid_validator', 'signal_hold', 'on_mqtt_event', 'on_flag'];
+  const allowed = ['uid_validator', 'signal_hold', 'on_mqtt_event', 'on_flag', 'if_condition', 'interval_task'];
   if (!allowed.includes(nextType)) {
     dev.template = null;
     markDirty();
@@ -907,6 +1011,16 @@ function setDeviceTemplate(dev, type) {
         type: nextType,
         flag: defaultFlagTemplate(),
       };
+    } else if (nextType === 'if_condition') {
+      dev.template = {
+        type: nextType,
+        condition: defaultConditionTemplate(),
+      };
+    } else if (nextType === 'interval_task') {
+      dev.template = {
+        type: nextType,
+        interval: defaultIntervalTemplate(),
+      };
     }
   }
   if (nextType === 'uid_validator') {
@@ -917,6 +1031,10 @@ function setDeviceTemplate(dev, type) {
     ensureMqttTemplate(dev);
   } else if (nextType === 'on_flag') {
     ensureFlagTemplate(dev);
+  } else if (nextType === 'if_condition') {
+    ensureConditionTemplate(dev);
+  } else if (nextType === 'interval_task') {
+    ensureIntervalTemplate(dev);
   }
   markDirty();
   renderDeviceDetail();
@@ -958,6 +1076,22 @@ function defaultMqttTemplate() {
 function defaultFlagTemplate() {
   return {
     rules: [],
+  };
+}
+
+function defaultConditionTemplate() {
+  return {
+    mode: 'all',
+    rules: [],
+    true_scenario: '',
+    false_scenario: '',
+  };
+}
+
+function defaultIntervalTemplate() {
+  return {
+    interval_ms: 1000,
+    scenario: '',
   };
 }
 
@@ -1040,6 +1174,41 @@ function ensureFlagTemplate(dev) {
     rule.scenario = rule.scenario || '';
     rule.required_state = rule.required_state !== undefined ? !!rule.required_state : true;
   });
+}
+
+function ensureConditionTemplate(dev) {
+  if (!dev || !dev.template || dev.template.type !== 'if_condition') {
+    return;
+  }
+  if (!dev.template.condition) {
+    dev.template.condition = defaultConditionTemplate();
+  }
+  const tpl = dev.template.condition;
+  tpl.mode = tpl.mode === 'any' ? 'any' : 'all';
+  if (!Array.isArray(tpl.rules)) {
+    tpl.rules = [];
+  }
+  tpl.true_scenario = tpl.true_scenario || '';
+  tpl.false_scenario = tpl.false_scenario || '';
+  tpl.rules.forEach((rule) => {
+    rule.flag = rule.flag || '';
+    if (rule.required_state === undefined) {
+      rule.required_state = true;
+    }
+  });
+}
+
+function ensureIntervalTemplate(dev) {
+  if (!dev || !dev.template || dev.template.type !== 'interval_task') {
+    return;
+  }
+  if (!dev.template.interval) {
+    dev.template.interval = defaultIntervalTemplate();
+  }
+  if (typeof dev.template.interval.interval_ms !== 'number') {
+    dev.template.interval.interval_ms = 1000;
+  }
+  dev.template.interval.scenario = dev.template.interval.scenario || '';
 }
 
 function addTemplateSlot() {
@@ -1137,6 +1306,40 @@ function removeFlagRule(indexStr) {
     return;
   }
   dev.template.flag.rules.splice(idx, 1);
+  markDirty();
+  renderDeviceDetail();
+}
+
+function addConditionRule() {
+  const dev = currentDevice();
+  if (!dev || dev.template?.type !== 'if_condition') {
+    return;
+  }
+  ensureConditionTemplate(dev);
+  const tpl = dev.template.condition;
+  if (tpl.rules.length >= FLAG_RULE_LIMIT) {
+    setStatus('Condition limit reached', '#fbbf24');
+    return;
+  }
+  tpl.rules.push({
+    flag: '',
+    required_state: true,
+  });
+  markDirty();
+  renderDeviceDetail();
+}
+
+function removeConditionRule(indexStr) {
+  const dev = currentDevice();
+  if (!dev || dev.template?.type !== 'if_condition') {
+    return;
+  }
+  ensureConditionTemplate(dev);
+  const idx = parseInt(indexStr, 10);
+  if (Number.isNaN(idx)) {
+    return;
+  }
+  dev.template.condition.rules.splice(idx, 1);
   markDirty();
   renderDeviceDetail();
 }

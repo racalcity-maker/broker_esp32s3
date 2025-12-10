@@ -10,7 +10,8 @@ static device_descriptor_t *find_device(device_manager_config_t *cfg, const char
     if (!cfg || !id || !id[0]) {
         return NULL;
     }
-    for (uint8_t i = 0; i < cfg->device_count && i < DEVICE_MANAGER_MAX_DEVICES; ++i) {
+    uint8_t limit = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    for (uint8_t i = 0; i < cfg->device_count && i < limit; ++i) {
         device_descriptor_t *dev = &cfg->devices[i];
         if (dev->id[0] && strcasecmp(dev->id, id) == 0) {
             return dev;
@@ -25,7 +26,8 @@ static device_descriptor_t *ensure_device(device_manager_config_t *cfg, const ch
     if (dev) {
         memset(dev, 0, sizeof(*dev));
     } else {
-        if (cfg->device_count >= DEVICE_MANAGER_MAX_DEVICES) {
+        uint8_t limit = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+        if (cfg->device_count >= limit) {
             return NULL;
         }
         dev = &cfg->devices[cfg->device_count++];

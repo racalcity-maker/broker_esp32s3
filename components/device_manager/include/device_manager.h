@@ -40,11 +40,6 @@ typedef enum {
     DEVICE_ACTION_EVENT_BUS,
 } device_action_type_t;
 
-typedef enum {
-    DEVICE_CONDITION_ALL = 0,
-    DEVICE_CONDITION_ANY,
-} device_condition_type_t;
-
 typedef struct {
     char flag[DEVICE_MANAGER_FLAG_NAME_MAX_LEN];
     bool required_state;
@@ -128,13 +123,15 @@ typedef struct {
     uint8_t profile_count;
     char active_profile[DEVICE_MANAGER_ID_MAX_LEN];
     device_manager_profile_t profiles[DEVICE_MANAGER_MAX_PROFILES];
-    device_descriptor_t devices[DEVICE_MANAGER_MAX_DEVICES];
+    uint8_t device_capacity;
+    device_descriptor_t devices[];
 } device_manager_config_t;
 
 esp_err_t device_manager_init(void);
 esp_err_t device_manager_reload_from_nvs(void);
 esp_err_t device_manager_save_snapshot(void);
-const device_manager_config_t *device_manager_get(void);
+const device_manager_config_t *device_manager_lock_config(void);
+void device_manager_unlock_config(void);
 esp_err_t device_manager_apply(const device_manager_config_t *next);
 esp_err_t device_manager_sync_file(void);
 esp_err_t device_manager_export_json(char **out_json, size_t *out_len);

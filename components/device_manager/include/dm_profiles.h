@@ -12,5 +12,8 @@ void dm_profiles_sync_from_active(device_manager_config_t *cfg, bool create_if_m
 void dm_profiles_sync_to_active(device_manager_config_t *cfg);
 bool dm_profiles_id_valid(const char *id);
 esp_err_t dm_profiles_store_active(const device_manager_config_t *cfg);
-esp_err_t dm_profiles_load_profile(const char *profile_id, device_descriptor_t *devices, uint8_t *device_count);
+esp_err_t dm_profiles_load_profile(const char *profile_id,
+                                   device_descriptor_t *devices,
+                                   uint8_t capacity,
+                                   uint8_t *device_count);
 esp_err_t dm_profiles_delete_profile_file(const char *profile_id);

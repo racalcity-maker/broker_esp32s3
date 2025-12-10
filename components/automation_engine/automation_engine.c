@@ -226,18 +226,23 @@ static const device_descriptor_t *find_device_by_id(const char *id)
     if (!id || !id[0]) {
         return NULL;
     }
-    const device_manager_config_t *cfg = device_manager_get();
+    const device_manager_config_t *cfg = device_manager_lock_config();
     if (!cfg) {
+        device_manager_unlock_config();
         return NULL;
     }
-    for (uint8_t i = 0; i < cfg->device_count; ++i) {
+    const device_descriptor_t *result = NULL;
+    uint8_t limit = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    for (uint8_t i = 0; i < cfg->device_count && i < limit; ++i) {
         const device_descriptor_t *dev = &cfg->devices[i];
         if ((dev->id[0] && strcasecmp(dev->id, id) == 0) ||
             (dev->display_name[0] && strcasecmp(dev->display_name, id) == 0)) {
-            return dev;
+            result = dev;
+            break;
         }
     }
-    return NULL;
+    device_manager_unlock_config();
+    return result;
 }
 
 static const device_scenario_t *find_scenario_for_binding(const device_descriptor_t *device, const char *name)
@@ -310,18 +315,21 @@ esp_err_t automation_engine_start(void)
 
 void automation_engine_reload(void)
 {
-    const device_manager_config_t *cfg = device_manager_get();
-    if (!cfg) {
-        return;
-    }
     size_t capacity = AUTOMATION_TRIGGER_CAPACITY;
     automation_trigger_t *fresh = heap_caps_calloc(capacity, sizeof(automation_trigger_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!fresh) {
         ESP_LOGE(TAG, "alloc triggers failed");
         return;
     }
+    const device_manager_config_t *cfg = device_manager_lock_config();
+    if (!cfg) {
+        device_manager_unlock_config();
+        heap_caps_free(fresh);
+        return;
+    }
     size_t count = 0;
-    for (uint8_t d = 0; d < cfg->device_count && d < DEVICE_MANAGER_MAX_DEVICES; ++d) {
+    uint8_t device_cap = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    for (uint8_t d = 0; d < cfg->device_count && d < device_cap; ++d) {
         const device_descriptor_t *device = &cfg->devices[d];
         for (uint8_t t = 0; t < device->topic_count && t < DEVICE_MANAGER_MAX_TOPICS_PER_DEVICE; ++t) {
             const device_topic_binding_t *binding = &device->topics[t];
@@ -342,6 +350,7 @@ void automation_engine_reload(void)
             tr->scenario = scenario;
         }
     }
+    device_manager_unlock_config();
     if (s_trigger_mutex) {
         xSemaphoreTake(s_trigger_mutex, portMAX_DELAY);
     }

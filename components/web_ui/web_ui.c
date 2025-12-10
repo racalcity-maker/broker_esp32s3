@@ -49,15 +49,18 @@ static char *dup_empty_json_array(void)
 
 static char *build_uid_monitor_json(void)
 {
-    const device_manager_config_t *cfg = device_manager_get();
+    const device_manager_config_t *cfg = device_manager_lock_config();
     if (!cfg) {
+        device_manager_unlock_config();
         return dup_empty_json_array();
     }
     cJSON *root = cJSON_CreateArray();
     if (!root) {
+        device_manager_unlock_config();
         return dup_empty_json_array();
     }
-    for (uint8_t i = 0; i < cfg->device_count && i < DEVICE_MANAGER_MAX_DEVICES; ++i) {
+    uint8_t limit = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    for (uint8_t i = 0; i < cfg->device_count && i < limit; ++i) {
         const device_descriptor_t *dev = &cfg->devices[i];
         if (!dev->template_assigned || dev->template_config.type != DM_TEMPLATE_TYPE_UID) {
             continue;
@@ -65,6 +68,7 @@ static char *build_uid_monitor_json(void)
         cJSON *dev_obj = cJSON_CreateObject();
         if (!dev_obj) {
             cJSON_Delete(root);
+            device_manager_unlock_config();
             return dup_empty_json_array();
         }
         cJSON_AddStringToObject(dev_obj, "id", dev->id);
@@ -72,6 +76,7 @@ static char *build_uid_monitor_json(void)
         cJSON *slot_arr = cJSON_AddArrayToObject(dev_obj, "slots");
         if (!slot_arr) {
             cJSON_Delete(root);
+            device_manager_unlock_config();
             return dup_empty_json_array();
         }
         dm_uid_runtime_snapshot_t snapshot;
@@ -89,6 +94,7 @@ static char *build_uid_monitor_json(void)
             cJSON *slot_obj = cJSON_CreateObject();
             if (!slot_obj) {
                 cJSON_Delete(root);
+                device_manager_unlock_config();
                 return dup_empty_json_array();
             }
             cJSON_AddNumberToObject(slot_obj, "index", s);
@@ -106,6 +112,7 @@ static char *build_uid_monitor_json(void)
     }
     char *printed = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
+    device_manager_unlock_config();
     if (!printed) {
         return dup_empty_json_array();
     }

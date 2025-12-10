@@ -223,3 +223,21 @@ void dm_flag_trigger_template_clear(dm_flag_trigger_template_t *tpl)
     }
     memset(tpl, 0, sizeof(*tpl));
 }
+
+void dm_condition_template_clear(dm_condition_template_t *tpl)
+{
+    if (!tpl) {
+        return;
+    }
+    memset(tpl, 0, sizeof(*tpl));
+    tpl->mode = DEVICE_CONDITION_ALL;
+}
+
+void dm_interval_task_template_clear(dm_interval_task_template_t *tpl)
+{
+    if (!tpl) {
+        return;
+    }
+    memset(tpl, 0, sizeof(*tpl));
+    tpl->interval_ms = 1000;
+}

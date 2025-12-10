@@ -5,6 +5,11 @@
 
 #include "dm_limits.h"
 
+typedef enum {
+    DEVICE_CONDITION_ALL = 0,
+    DEVICE_CONDITION_ANY,
+} device_condition_type_t;
+
 // Generic UID validation template ------------------------------------------------
 
 #define DM_UID_TEMPLATE_MAX_SLOTS      8
@@ -146,3 +151,31 @@ typedef struct {
 } dm_flag_trigger_template_t;
 
 void dm_flag_trigger_template_clear(dm_flag_trigger_template_t *tpl);
+
+// If-condition template --------------------------------------------------------
+
+#define DM_CONDITION_TEMPLATE_MAX_RULES 8
+
+typedef struct {
+    char flag[DEVICE_MANAGER_FLAG_NAME_MAX_LEN];
+    bool required_state;
+} dm_condition_rule_t;
+
+typedef struct {
+    device_condition_type_t mode;
+    dm_condition_rule_t rules[DM_CONDITION_TEMPLATE_MAX_RULES];
+    uint8_t rule_count;
+    char true_scenario[DEVICE_MANAGER_ID_MAX_LEN];
+    char false_scenario[DEVICE_MANAGER_ID_MAX_LEN];
+} dm_condition_template_t;
+
+void dm_condition_template_clear(dm_condition_template_t *tpl);
+
+// Interval task template ------------------------------------------------------
+
+typedef struct {
+    uint32_t interval_ms;
+    char scenario[DEVICE_MANAGER_ID_MAX_LEN];
+} dm_interval_task_template_t;
+
+void dm_interval_task_template_clear(dm_interval_task_template_t *tpl);

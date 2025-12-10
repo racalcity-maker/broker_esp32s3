@@ -11,6 +11,8 @@ idf_component_register(
         "runtime/dm_runtime_signal.c"
         "runtime/dm_runtime_mqtt.c"
         "runtime/dm_runtime_flag.c"
+        "runtime/dm_runtime_condition.c"
+        "runtime/dm_runtime_interval.c"
         "template_registry.c"
         "template_factory.c"
         "template_applier.c"

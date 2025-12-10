@@ -256,6 +256,58 @@ static cJSON *flag_template_to_json(const dm_flag_trigger_template_t *tpl)
     return root;
 }
 
+static cJSON *condition_template_to_json(const dm_condition_template_t *tpl)
+{
+    if (!tpl) {
+        return NULL;
+    }
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        return NULL;
+    }
+    cJSON_AddStringToObject(root, "mode", dm_condition_to_string(tpl->mode));
+    if (tpl->true_scenario[0]) {
+        cJSON_AddStringToObject(root, "true_scenario", tpl->true_scenario);
+    }
+    if (tpl->false_scenario[0]) {
+        cJSON_AddStringToObject(root, "false_scenario", tpl->false_scenario);
+    }
+    cJSON *rules = cJSON_AddArrayToObject(root, "rules");
+    if (!rules) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    for (uint8_t i = 0; i < tpl->rule_count && i < DM_CONDITION_TEMPLATE_MAX_RULES; ++i) {
+        const dm_condition_rule_t *rule = &tpl->rules[i];
+        if (!rule->flag[0]) {
+            continue;
+        }
+        cJSON *obj = cJSON_CreateObject();
+        if (!obj) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddItemToArray(rules, obj);
+        cJSON_AddStringToObject(obj, "flag", rule->flag);
+        cJSON_AddBoolToObject(obj, "state", rule->required_state);
+    }
+    return root;
+}
+
+static cJSON *interval_template_to_json(const dm_interval_task_template_t *tpl)
+{
+    if (!tpl) {
+        return NULL;
+    }
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        return NULL;
+    }
+    cJSON_AddNumberToObject(root, "interval_ms", (double)tpl->interval_ms);
+    template_to_json_string(root, "scenario", tpl->scenario);
+    return root;
+}
+
 static cJSON *template_to_json(const device_descriptor_t *dev)
 {
     if (!dev || !dev->template_assigned) {
@@ -293,6 +345,18 @@ static cJSON *template_to_json(const device_descriptor_t *dev)
             cJSON_AddItemToObject(root, "flag", data);
         }
         break;
+    case DM_TEMPLATE_TYPE_IF_CONDITION:
+        data = condition_template_to_json(&dev->template_config.data.condition);
+        if (data) {
+            cJSON_AddItemToObject(root, "condition", data);
+        }
+        break;
+    case DM_TEMPLATE_TYPE_INTERVAL_TASK:
+        data = interval_template_to_json(&dev->template_config.data.interval);
+        if (data) {
+            cJSON_AddItemToObject(root, "interval", data);
+        }
+        break;
     default:
         break;
     }
@@ -313,8 +377,10 @@ esp_err_t dm_storage_internal_export(const device_manager_config_t *cfg, char **
         *out_len = 0;
     }
     esp_err_t err = ESP_OK;
+    dm_cjson_install_hooks();
     cJSON *root = cJSON_CreateObject();
     if (!root) {
+        dm_cjson_reset_hooks();
         return ESP_ERR_NO_MEM;
     }
     cJSON_AddNumberToObject(root, "schema", cfg->schema_version);
@@ -351,7 +417,8 @@ esp_err_t dm_storage_internal_export(const device_manager_config_t *cfg, char **
         err = ESP_ERR_NO_MEM;
         goto cleanup;
     }
-    for (uint8_t i = 0; i < cfg->device_count && i < DEVICE_MANAGER_MAX_DEVICES; ++i) {
+    uint8_t device_cap = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    for (uint8_t i = 0; i < cfg->device_count && i < device_cap; ++i) {
         feed_wdt();
         const device_descriptor_t *dev = &cfg->devices[i];
         cJSON *d = cJSON_CreateObject();
@@ -466,6 +533,7 @@ cleanup:
     if (root) {
         cJSON_Delete(root);
     }
+    dm_cjson_reset_hooks();
     return err;
 }
 

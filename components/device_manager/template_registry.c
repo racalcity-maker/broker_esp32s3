@@ -27,6 +27,18 @@ static const dm_template_descriptor_t s_templates[] = {
         .label = "Flag Trigger",
         .description = "Watches automation flags and triggers scenarios on specific states.",
     },
+    {
+        .type = DM_TEMPLATE_TYPE_IF_CONDITION,
+        .id = "if_condition",
+        .label = "Conditional Scenario",
+        .description = "Evaluates multiple flag conditions and runs true/false scenarios.",
+    },
+    {
+        .type = DM_TEMPLATE_TYPE_INTERVAL_TASK,
+        .id = "interval_task",
+        .label = "Interval Task",
+        .description = "Runs a scenario on a fixed interval.",
+    },
 };
 
 const dm_template_descriptor_t *dm_template_registry_get_all(size_t *count)
