@@ -179,3 +179,35 @@ typedef struct {
 } dm_interval_task_template_t;
 
 void dm_interval_task_template_clear(dm_interval_task_template_t *tpl);
+
+// Sequence lock template ------------------------------------------------------
+
+#define DM_SEQUENCE_TEMPLATE_MAX_STEPS 8
+
+typedef struct {
+    char topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+    bool payload_required;
+    char hint_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char hint_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+    char hint_audio_track[DEVICE_MANAGER_TRACK_NAME_MAX_LEN];
+} dm_sequence_step_t;
+
+typedef struct {
+    dm_sequence_step_t steps[DM_SEQUENCE_TEMPLATE_MAX_STEPS];
+    uint8_t step_count;
+    uint32_t timeout_ms;
+    bool reset_on_error;
+
+    char success_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char success_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+    char success_audio_track[DEVICE_MANAGER_TRACK_NAME_MAX_LEN];
+    char success_scenario[DEVICE_MANAGER_ID_MAX_LEN];
+
+    char fail_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char fail_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+    char fail_audio_track[DEVICE_MANAGER_TRACK_NAME_MAX_LEN];
+    char fail_scenario[DEVICE_MANAGER_ID_MAX_LEN];
+} dm_sequence_template_t;
+
+void dm_sequence_template_clear(dm_sequence_template_t *tpl);

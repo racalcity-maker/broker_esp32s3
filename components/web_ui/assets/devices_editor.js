@@ -2,6 +2,7 @@
   const LIMITS = {
     devices: 12,
     uidSlots: 8,
+    sequenceSteps: 8,
     mqttRules: 8,
     flagRules: 8,
   };
@@ -25,6 +26,7 @@
       {id: 'on_flag', label: 'Flag trigger'},
       {id: 'if_condition', label: 'Conditional scenario'},
       {id: 'interval_task', label: 'Interval task'},
+      {id: 'sequence_lock', label: 'Sequence lock'},
     ],
   };
 
@@ -104,6 +106,12 @@
           break;
         case 'slot-remove':
           removeSlot(parseInt(button.dataset.index, 10));
+          break;
+        case 'sequence-step-add':
+          addSequenceStep();
+          break;
+        case 'sequence-step-remove':
+          removeSequenceStep(parseInt(button.dataset.index, 10));
           break;
         case 'mqtt-rule-add':
           addMqttRule();
@@ -227,6 +235,34 @@
       } else if (sub === 'scenario') {
         dev.template.interval.scenario = target.value;
       }
+    } else if (target.dataset.field === 'sequence-step') {
+      if (!dev.template || dev.template.type !== 'sequence_lock' || !dev.template.sequence) return;
+      const idx = parseInt(target.dataset.index, 10);
+      if (Number.isNaN(idx) || !dev.template.sequence.steps || !dev.template.sequence.steps[idx]) {
+        return;
+      }
+      const sub = target.dataset.subfield;
+      if (sub === 'payload_required') {
+        dev.template.sequence.steps[idx].payload_required = target.type === 'checkbox'
+          ? target.checked
+          : target.value === 'true';
+      } else if (sub) {
+        dev.template.sequence.steps[idx][sub] = target.value;
+      }
+    } else if (target.dataset.field === 'sequence') {
+      if (!dev.template || dev.template.type !== 'sequence_lock' || !dev.template.sequence) return;
+      const sub = target.dataset.subfield;
+      if (sub === 'timeout_ms') {
+        const raw = parseInt(target.value, 10);
+        dev.template.sequence.timeout_ms = Number.isFinite(raw) && raw >= 0 ? raw : 0;
+        target.value = dev.template.sequence.timeout_ms;
+      } else if (sub === 'reset_on_error') {
+        dev.template.sequence.reset_on_error = target.type === 'checkbox'
+          ? target.checked
+          : target.value === 'true';
+      } else {
+        dev.template.sequence[sub] = target.value;
+      }
     }
     markDirty();
     renderSidebar();
@@ -327,6 +363,8 @@
       html.push(renderConditionTemplate(dev));
     } else if (dev.template && dev.template.type === 'interval_task') {
       html.push(renderIntervalTemplate(dev));
+    } else if (dev.template && dev.template.type === 'sequence_lock') {
+      html.push(renderSequenceTemplate(dev));
     } else {
       html.push("<div class='dx-empty'>Assign template to configure behavior.</div>");
     }
@@ -396,6 +434,23 @@
         interval: {
           interval_ms: 1000,
           scenario: '',
+        },
+      };
+    } else if (type === 'sequence_lock') {
+      dev.template = {
+        type: type,
+        sequence: {
+          steps: [],
+          timeout_ms: 0,
+          reset_on_error: true,
+          success_topic: '',
+          success_payload: '',
+          success_audio_track: '',
+          success_scenario: '',
+          fail_topic: '',
+          fail_payload: '',
+          fail_audio_track: '',
+          fail_scenario: '',
         },
       };
     } else {
@@ -589,6 +644,57 @@
     return html.join('');
   }
 
+  function renderSequenceTemplate(dev) {
+    const tpl = dev.template.sequence || {steps: []};
+    tpl.steps = Array.isArray(tpl.steps) ? tpl.steps : [];
+    const html = [];
+    html.push("<div class='dx-section'><div class='dx-section-head'>Sequence steps<button data-action='sequence-step-add'>Add step</button></div>");
+    if (!tpl.steps.length) {
+      html.push("<div class='dx-empty'>No steps defined. Add at least one MQTT event.</div>");
+    } else {
+      tpl.steps.forEach((step, idx) => {
+        html.push("<div class='dx-slot'>");
+        html.push("<div class='dx-slot-head'>Step " + (idx + 1) +
+          "<button data-action='sequence-step-remove' data-index='" + idx + "'>&times;</button></div>");
+        html.push(actionInput('sequence-step', 'topic', step.topic || '', 'MQTT topic', idx));
+        html.push(actionInput('sequence-step', 'payload', step.payload || '', 'Payload', idx));
+        const payloadChecked = step.payload_required ? ' checked' : '';
+        html.push("<div class='dx-field'><label class='dx-checkbox'><input type='checkbox' data-field='sequence-step' data-subfield='payload_required' data-index='" +
+          idx + "'" + payloadChecked + ">Require exact payload</label></div>");
+        html.push("<div class='dx-field'><label>Hint topic</label><input data-field='sequence-step' data-subfield='hint_topic' data-index='" +
+          idx + "' value='" + escapeHtml(step.hint_topic || '') + "' placeholder='hint/topic'></div>");
+        html.push("<div class='dx-field'><label>Hint payload</label><input data-field='sequence-step' data-subfield='hint_payload' data-index='" +
+          idx + "' value='" + escapeHtml(step.hint_payload || '') + "' placeholder='payload to publish'></div>");
+        html.push("<div class='dx-field'><label>Hint audio track</label><input data-field='sequence-step' data-subfield='hint_audio_track' data-index='" +
+          idx + "' value='" + escapeHtml(step.hint_audio_track || '') + "' placeholder='/sdcard/hint.mp3'></div>");
+        html.push('</div>');
+      });
+    }
+    html.push("<div class='dx-hint'>Steps advance when matching MQTT messages arrive in order.</div>");
+    html.push('</div>');
+    html.push("<div class='dx-section'><div class='dx-section-head'>Runtime settings</div>");
+    html.push("<div class='dx-field'><label>Timeout (ms)</label><input type='number' min='0' step='100' data-field='sequence' data-subfield='timeout_ms' value='" +
+      escapeHtml(tpl.timeout_ms || 0) + "' placeholder='0 = no timeout'></div>");
+    const resetChecked = tpl.reset_on_error !== false ? ' checked' : '';
+    html.push("<div class='dx-field'><label class='dx-checkbox'><input type='checkbox' data-field='sequence' data-subfield='reset_on_error'" +
+      resetChecked + ">Reset on wrong message</label></div>");
+    html.push('</div>');
+    html.push("<div class='dx-section'><div class='dx-section-head'>Success actions</div>");
+    html.push(actionInput('sequence', 'success_topic', tpl.success_topic || '', 'MQTT topic'));
+    html.push(actionInput('sequence', 'success_payload', tpl.success_payload || '', 'Payload'));
+    html.push(actionInput('sequence', 'success_audio_track', tpl.success_audio_track || '', 'Audio track'));
+    html.push(actionInput('sequence', 'success_scenario', tpl.success_scenario || '', 'Scenario ID'));
+    html.push('</div>');
+    html.push("<div class='dx-section'><div class='dx-section-head'>Fail actions</div>");
+    html.push(actionInput('sequence', 'fail_topic', tpl.fail_topic || '', 'MQTT topic'));
+    html.push(actionInput('sequence', 'fail_payload', tpl.fail_payload || '', 'Payload'));
+    html.push(actionInput('sequence', 'fail_audio_track', tpl.fail_audio_track || '', 'Audio track'));
+    html.push(actionInput('sequence', 'fail_scenario', tpl.fail_scenario || '', 'Scenario ID'));
+    html.push("<div class='dx-hint'>Failure actions run when timeout expires or unexpected steps arrive.</div>");
+    html.push('</div>');
+    return html.join('');
+  }
+
   function renderScenarioSection(dev) {
     const scenarios = Array.isArray(dev.scenarios) ? dev.scenarios : [];
     const html = [];
@@ -684,6 +790,44 @@
       return;
     }
     dev.template.uid.slots.splice(idx, 1);
+    markDirty();
+    renderDetail();
+  }
+
+  function addSequenceStep() {
+    const dev = state.devices[state.selectedDevice];
+    if (!dev || !dev.template || dev.template.type !== 'sequence_lock' || !dev.template.sequence) {
+      return;
+    }
+    dev.template.sequence.steps = Array.isArray(dev.template.sequence.steps)
+      ? dev.template.sequence.steps : [];
+    if (dev.template.sequence.steps.length >= LIMITS.sequenceSteps) {
+      setStatus('Step limit reached', 'warn');
+      return;
+    }
+    dev.template.sequence.steps.push({
+      topic: '',
+      payload: '',
+      payload_required: false,
+      hint_topic: '',
+      hint_payload: '',
+      hint_audio_track: '',
+    });
+    markDirty();
+    renderDetail();
+  }
+
+  function removeSequenceStep(idx) {
+    const dev = state.devices[state.selectedDevice];
+    if (!dev || !dev.template || dev.template.type !== 'sequence_lock' || !dev.template.sequence) {
+      return;
+    }
+    dev.template.sequence.steps = Array.isArray(dev.template.sequence.steps)
+      ? dev.template.sequence.steps : [];
+    if (Number.isNaN(idx) || idx < 0 || idx >= dev.template.sequence.steps.length) {
+      return;
+    }
+    dev.template.sequence.steps.splice(idx, 1);
     markDirty();
     renderDetail();
   }

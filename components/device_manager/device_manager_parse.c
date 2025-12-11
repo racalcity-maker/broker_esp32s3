@@ -10,6 +10,7 @@
 
 static const char *TAG = "device_manager";
 
+// Utility: clamp JSON numeric field to uint32_t range or default.
 static uint32_t json_number_to_u32(const cJSON *item, uint32_t default_val)
 {
     if (!item || !cJSON_IsNumber(item) || item->valuedouble < 0) {
@@ -22,6 +23,7 @@ static uint32_t json_number_to_u32(const cJSON *item, uint32_t default_val)
     return (uint32_t)v;
 }
 
+// Utility: clamp JSON numeric field to uint16_t range or default.
 static uint16_t json_number_to_u16(const cJSON *item, uint16_t default_val)
 {
     if (!item || !cJSON_IsNumber(item) || item->valuedouble < 0) {
@@ -34,6 +36,7 @@ static uint16_t json_number_to_u16(const cJSON *item, uint16_t default_val)
     return (uint16_t)v;
 }
 
+// Return boolean value if present, otherwise fall back to default.
 static bool json_get_bool_default(const cJSON *item, bool default_val)
 {
     if (!item) {
@@ -45,6 +48,7 @@ static bool json_get_bool_default(const cJSON *item, bool default_val)
     return default_val;
 }
 
+// Parse UID validator configuration from JSON into struct.
 static bool uid_template_from_json(dm_uid_template_t *tpl, const cJSON *obj)
 {
     if (!tpl || !obj) {
@@ -128,6 +132,7 @@ static bool uid_template_from_json(dm_uid_template_t *tpl, const cJSON *obj)
     return tpl->slot_count > 0;
 }
 
+// Parse laser/hold template from JSON object.
 static bool signal_template_from_json(dm_signal_hold_template_t *tpl, const cJSON *obj)
 {
     if (!tpl || !obj) {
@@ -168,6 +173,7 @@ static bool signal_template_from_json(dm_signal_hold_template_t *tpl, const cJSO
     return tpl->signal_topic[0] && tpl->heartbeat_topic[0] && tpl->required_hold_ms > 0;
 }
 
+// Parse MQTT trigger rules from JSON array.
 static bool mqtt_trigger_from_json(dm_mqtt_trigger_template_t *tpl, const cJSON *obj)
 {
     if (!tpl || !obj) {
@@ -213,6 +219,7 @@ static bool mqtt_trigger_from_json(dm_mqtt_trigger_template_t *tpl, const cJSON 
     return tpl->rule_count > 0;
 }
 
+// Parse flag-trigger template.
 static bool flag_trigger_from_json(dm_flag_trigger_template_t *tpl, const cJSON *obj)
 {
     if (!tpl || !obj) {
@@ -253,6 +260,7 @@ static bool flag_trigger_from_json(dm_flag_trigger_template_t *tpl, const cJSON 
     return tpl->rule_count > 0;
 }
 
+// Parse conditional scenario template (if/then behavior).
 static bool condition_template_from_json(dm_condition_template_t *tpl, const cJSON *obj)
 {
     if (!tpl || !obj) {
@@ -298,6 +306,7 @@ static bool condition_template_from_json(dm_condition_template_t *tpl, const cJS
     return tpl->rule_count > 0 && tpl->true_scenario[0];
 }
 
+// Parse periodic task template from JSON.
 static bool interval_template_from_json(dm_interval_task_template_t *tpl, const cJSON *obj)
 {
     if (!tpl || !obj) {
@@ -312,6 +321,93 @@ static bool interval_template_from_json(dm_interval_task_template_t *tpl, const 
     return tpl->interval_ms > 0 && tpl->scenario[0];
 }
 
+// Parse ordered-sequence template (new puzzle) from JSON.
+static bool sequence_template_from_json(dm_sequence_template_t *tpl, const cJSON *obj)
+{
+    if (!tpl || !obj) {
+        return false;
+    }
+    dm_sequence_template_clear(tpl);
+    const cJSON *steps = cJSON_GetObjectItem(obj, "steps");
+    if (!cJSON_IsArray(steps)) {
+        return false;
+    }
+    uint8_t step_index = 0;
+    const cJSON *step_obj = NULL;
+    cJSON_ArrayForEach(step_obj, steps) {
+        if (step_index >= DM_SEQUENCE_TEMPLATE_MAX_STEPS) {
+            break;
+        }
+        if (!cJSON_IsObject(step_obj)) {
+            continue;
+        }
+        const cJSON *topic = cJSON_GetObjectItem(step_obj, "topic");
+        if (!cJSON_IsString(topic) || !topic->valuestring || !topic->valuestring[0]) {
+            continue;
+        }
+        dm_sequence_step_t *step = &tpl->steps[step_index];
+        memset(step, 0, sizeof(*step));
+        dm_str_copy(step->topic, sizeof(step->topic), topic->valuestring);
+        const cJSON *payload = cJSON_GetObjectItem(step_obj, "payload");
+        if (cJSON_IsString(payload) && payload->valuestring) {
+            dm_str_copy(step->payload, sizeof(step->payload), payload->valuestring);
+        }
+        step->payload_required =
+            json_get_bool_default(cJSON_GetObjectItem(step_obj, "payload_required"), step->payload_required);
+        const cJSON *hint_topic = cJSON_GetObjectItem(step_obj, "hint_topic");
+        if (cJSON_IsString(hint_topic) && hint_topic->valuestring) {
+            dm_str_copy(step->hint_topic, sizeof(step->hint_topic), hint_topic->valuestring);
+        }
+        const cJSON *hint_payload = cJSON_GetObjectItem(step_obj, "hint_payload");
+        if (cJSON_IsString(hint_payload) && hint_payload->valuestring) {
+            dm_str_copy(step->hint_payload, sizeof(step->hint_payload), hint_payload->valuestring);
+        }
+        const cJSON *hint_audio = cJSON_GetObjectItem(step_obj, "hint_audio_track");
+        if (cJSON_IsString(hint_audio) && hint_audio->valuestring) {
+            dm_str_copy(step->hint_audio_track, sizeof(step->hint_audio_track), hint_audio->valuestring);
+        }
+        step_index++;
+    }
+    tpl->step_count = step_index;
+    tpl->timeout_ms = json_number_to_u32(cJSON_GetObjectItem(obj, "timeout_ms"), tpl->timeout_ms);
+    tpl->reset_on_error =
+        json_get_bool_default(cJSON_GetObjectItem(obj, "reset_on_error"), tpl->reset_on_error);
+    const cJSON *success_topic = cJSON_GetObjectItem(obj, "success_topic");
+    if (cJSON_IsString(success_topic) && success_topic->valuestring) {
+        dm_str_copy(tpl->success_topic, sizeof(tpl->success_topic), success_topic->valuestring);
+    }
+    const cJSON *success_payload = cJSON_GetObjectItem(obj, "success_payload");
+    if (cJSON_IsString(success_payload) && success_payload->valuestring) {
+        dm_str_copy(tpl->success_payload, sizeof(tpl->success_payload), success_payload->valuestring);
+    }
+    const cJSON *success_audio = cJSON_GetObjectItem(obj, "success_audio_track");
+    if (cJSON_IsString(success_audio) && success_audio->valuestring) {
+        dm_str_copy(tpl->success_audio_track, sizeof(tpl->success_audio_track), success_audio->valuestring);
+    }
+    const cJSON *success_scenario = cJSON_GetObjectItem(obj, "success_scenario");
+    if (cJSON_IsString(success_scenario) && success_scenario->valuestring) {
+        dm_str_copy(tpl->success_scenario, sizeof(tpl->success_scenario), success_scenario->valuestring);
+    }
+    const cJSON *fail_topic = cJSON_GetObjectItem(obj, "fail_topic");
+    if (cJSON_IsString(fail_topic) && fail_topic->valuestring) {
+        dm_str_copy(tpl->fail_topic, sizeof(tpl->fail_topic), fail_topic->valuestring);
+    }
+    const cJSON *fail_payload = cJSON_GetObjectItem(obj, "fail_payload");
+    if (cJSON_IsString(fail_payload) && fail_payload->valuestring) {
+        dm_str_copy(tpl->fail_payload, sizeof(tpl->fail_payload), fail_payload->valuestring);
+    }
+    const cJSON *fail_audio = cJSON_GetObjectItem(obj, "fail_audio_track");
+    if (cJSON_IsString(fail_audio) && fail_audio->valuestring) {
+        dm_str_copy(tpl->fail_audio_track, sizeof(tpl->fail_audio_track), fail_audio->valuestring);
+    }
+    const cJSON *fail_scenario = cJSON_GetObjectItem(obj, "fail_scenario");
+    if (cJSON_IsString(fail_scenario) && fail_scenario->valuestring) {
+        dm_str_copy(tpl->fail_scenario, sizeof(tpl->fail_scenario), fail_scenario->valuestring);
+    }
+    return tpl->step_count > 0;
+}
+
+// Dispatch helper: parse template payload based on requested type.
 static bool template_from_json(device_descriptor_t *dev, const cJSON *obj)
 {
     if (!dev || !obj) {
@@ -362,6 +458,11 @@ static bool template_from_json(device_descriptor_t *dev, const cJSON *obj)
         ok = interval_template_from_json(&dev->template_config.data.interval, interval_obj);
         break;
     }
+    case DM_TEMPLATE_TYPE_SEQUENCE_LOCK: {
+        const cJSON *sequence_obj = cJSON_GetObjectItem(obj, "sequence");
+        ok = sequence_template_from_json(&dev->template_config.data.sequence, sequence_obj);
+        break;
+    }
     default:
         ok = false;
         break;
@@ -372,6 +473,7 @@ static bool template_from_json(device_descriptor_t *dev, const cJSON *obj)
     return dev->template_assigned;
 }
 
+// Parse single scenario step (MQTT/audio/flags/etc).
 static bool step_from_json(const cJSON *obj, device_action_step_t *step)
 {
     if (!obj || !step) {
@@ -484,6 +586,7 @@ void dm_load_defaults(device_manager_config_t *cfg)
     dm_profiles_ensure_active(cfg);
 }
 
+// Convert JSON tree into in-memory device_manager_config_t.
 bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *root)
 {
     if (!cfg || !root) {
@@ -496,6 +599,7 @@ bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *roo
     cfg->tab_limit = (uint8_t)((tab_limit > DEVICE_MANAGER_MAX_TABS) ? DEVICE_MANAGER_MAX_TABS : tab_limit);
     cfg->profile_count = 0;
     cfg->active_profile[0] = 0;
+    // Profiles array only stores metadata and device_count, actual devices parsed below.
     const cJSON *profiles = cJSON_GetObjectItem(root, "profiles");
     if (cJSON_IsArray(profiles)) {
         const cJSON *node = NULL;
@@ -537,6 +641,7 @@ bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *roo
     }
     dm_profiles_ensure_active(cfg);
 
+    // Parse devices with tabs/topics/scenarios/template payloads.
     const cJSON *devices = cJSON_GetObjectItem(root, "devices");
     if (!devices || !cJSON_IsArray(devices)) {
         cfg->device_count = 0;

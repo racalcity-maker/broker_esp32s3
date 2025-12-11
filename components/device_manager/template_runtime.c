@@ -13,6 +13,7 @@
 #include "dm_runtime_flag.h"
 #include "dm_runtime_condition.h"
 #include "dm_runtime_interval.h"
+#include "dm_runtime_sequence.h"
 #include "device_manager_utils.h"
 #include "audio_player.h"
 #include "automation_engine.h"
@@ -59,10 +60,16 @@ typedef struct condition_runtime_entry {
 
 typedef struct interval_runtime_entry {
     char device_id[DEVICE_MANAGER_ID_MAX_LEN];
-    dm_interval_task_runtime_t runtime;
+   dm_interval_task_runtime_t runtime;
     esp_timer_handle_t timer;
     struct interval_runtime_entry *next;
 } interval_runtime_entry_t;
+
+typedef struct sequence_runtime_entry {
+    char device_id[DEVICE_MANAGER_ID_MAX_LEN];
+    dm_sequence_runtime_t runtime;
+    struct sequence_runtime_entry *next;
+} sequence_runtime_entry_t;
 
 static uid_runtime_entry_t *s_uid_entries;
 static signal_runtime_entry_t *s_signal_entries;
@@ -70,6 +77,7 @@ static mqtt_runtime_entry_t *s_mqtt_entries;
 static flag_runtime_entry_t *s_flag_entries;
 static condition_runtime_entry_t *s_condition_entries;
 static interval_runtime_entry_t *s_interval_entries;
+static sequence_runtime_entry_t *s_sequence_entries;
 static bool s_event_handler_registered = false;
 
 static bool payload_to_bool(const char *payload)
@@ -189,6 +197,17 @@ static void free_interval_entries(void)
     s_interval_entries = NULL;
 }
 
+static void free_sequence_entries(void)
+{
+    sequence_runtime_entry_t *entry = s_sequence_entries;
+    while (entry) {
+        sequence_runtime_entry_t *next = entry->next;
+        heap_caps_free(entry);
+        entry = next;
+    }
+    s_sequence_entries = NULL;
+}
+
 static const char *uid_event_str(dm_uid_event_type_t type)
 {
     switch (type) {
@@ -213,6 +232,7 @@ esp_err_t dm_template_runtime_init(void)
     free_flag_entries();
     free_condition_entries();
     free_interval_entries();
+    free_sequence_entries();
     if (!s_event_handler_registered) {
         esp_err_t err = event_bus_register_handler(template_event_handler);
         if (err != ESP_OK) {
@@ -391,6 +411,26 @@ static esp_err_t register_interval_runtime(const dm_interval_task_template_t *tp
     return ESP_OK;
 }
 
+static esp_err_t register_sequence_runtime(const dm_sequence_template_t *tpl, const char *device_id)
+{
+    if (!tpl || tpl->step_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sequence_runtime_entry_t *entry = runtime_alloc(sizeof(*entry));
+    if (!entry) {
+        ESP_LOGE(TAG, "no memory for sequence runtime");
+        return ESP_ERR_NO_MEM;
+    }
+    dm_str_copy(entry->device_id, sizeof(entry->device_id), device_id);
+    dm_sequence_runtime_init(&entry->runtime, tpl);
+    entry->next = s_sequence_entries;
+    s_sequence_entries = entry;
+    ESP_LOGI(TAG, "registered sequence runtime for %s (%u steps)",
+             entry->device_id,
+             (unsigned)tpl->step_count);
+    return ESP_OK;
+}
+
 esp_err_t dm_template_runtime_register(const dm_template_config_t *tpl, const char *device_id)
 {
     if (!tpl || !device_id) {
@@ -409,6 +449,8 @@ esp_err_t dm_template_runtime_register(const dm_template_config_t *tpl, const ch
         return register_condition_runtime(&tpl->data.condition, device_id);
     case DM_TEMPLATE_TYPE_INTERVAL_TASK:
         return register_interval_runtime(&tpl->data.interval, device_id);
+    case DM_TEMPLATE_TYPE_SEQUENCE_LOCK:
+        return register_sequence_runtime(&tpl->data.sequence, device_id);
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -463,6 +505,17 @@ static void trigger_uid_scenario(const char *device_id, const char *scenario_id)
         ESP_LOGD(TAG, "scenario %s/%s not found", device_id, scenario_id);
     } else if (err != ESP_OK) {
         ESP_LOGW(TAG, "failed to trigger %s/%s: %s", device_id, scenario_id, esp_err_to_name(err));
+    }
+}
+
+static void trigger_device_scenario(const char *device_id, const char *scenario_id)
+{
+    if (!scenario_id || !scenario_id[0]) {
+        return;
+    }
+    esp_err_t err = automation_engine_trigger(device_id, scenario_id);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scenario %s/%s failed: %s", device_id, scenario_id, esp_err_to_name(err));
     }
 }
 
@@ -567,6 +620,100 @@ static void apply_signal_mqtt_action(const dm_signal_action_t *action)
     }
 }
 
+static void apply_sequence_step_hint(const dm_sequence_step_t *step)
+{
+    if (!step) {
+        return;
+    }
+    if (step->hint_topic[0]) {
+        publish_mqtt_payload(step->hint_topic, step->hint_payload);
+    }
+    if (step->hint_audio_track[0]) {
+        audio_player_play(step->hint_audio_track);
+    }
+}
+
+static void apply_sequence_success(sequence_runtime_entry_t *entry)
+{
+    if (!entry) {
+        return;
+    }
+    const dm_sequence_template_t *cfg = &entry->runtime.config;
+    publish_mqtt_payload(cfg->success_topic, cfg->success_payload);
+    if (cfg->success_audio_track[0]) {
+        audio_player_play(cfg->success_audio_track);
+    }
+    trigger_device_scenario(entry->device_id, cfg->success_scenario);
+}
+
+static void apply_sequence_fail(sequence_runtime_entry_t *entry)
+{
+    if (!entry) {
+        return;
+    }
+    const dm_sequence_template_t *cfg = &entry->runtime.config;
+    publish_mqtt_payload(cfg->fail_topic, cfg->fail_payload);
+    if (cfg->fail_audio_track[0]) {
+        audio_player_play(cfg->fail_audio_track);
+    }
+    trigger_device_scenario(entry->device_id, cfg->fail_scenario);
+}
+
+static bool handle_sequence_message(const char *topic, const char *payload)
+{
+    if (!topic || !topic[0]) {
+        return false;
+    }
+    bool handled = false;
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    for (sequence_runtime_entry_t *entry = s_sequence_entries; entry; entry = entry->next) {
+        dm_sequence_action_t action =
+            dm_sequence_runtime_handle(&entry->runtime, topic, payload, now_ms);
+        if (action.type == DM_SEQUENCE_EVENT_NONE && !action.step) {
+            continue;
+        }
+        handled = true;
+        const char *step_topic = action.step && action.step->topic[0] ? action.step->topic : topic;
+        switch (action.type) {
+        case DM_SEQUENCE_EVENT_STEP_OK:
+            ESP_LOGI(TAG, "[Sequence] dev=%s step ok topic=%s payload='%s'",
+                     entry->device_id,
+                     step_topic,
+                     payload ? payload : "");
+            if (action.step) {
+                apply_sequence_step_hint(action.step);
+            }
+            break;
+        case DM_SEQUENCE_EVENT_COMPLETED:
+            ESP_LOGI(TAG, "[Sequence] dev=%s completed topic=%s payload='%s'",
+                     entry->device_id,
+                     step_topic,
+                     payload ? payload : "");
+            if (action.step) {
+                apply_sequence_step_hint(action.step);
+            }
+            apply_sequence_success(entry);
+            break;
+        case DM_SEQUENCE_EVENT_FAILED:
+            ESP_LOGW(TAG, "[Sequence] dev=%s failed topic=%s payload='%s'%s",
+                     entry->device_id,
+                     step_topic,
+                     payload ? payload : "",
+                     action.timeout ? " (timeout)" : "");
+            apply_sequence_fail(entry);
+            break;
+        case DM_SEQUENCE_EVENT_NONE:
+        default:
+            ESP_LOGD(TAG, "[Sequence] dev=%s ignored topic=%s payload='%s'",
+                     entry->device_id,
+                     step_topic,
+                     payload ? payload : "");
+            break;
+        }
+    }
+    return handled;
+}
+
 static bool handle_signal_message(const char *topic)
 {
     bool handled = false;
@@ -620,6 +767,7 @@ bool dm_template_runtime_handle_mqtt(const char *topic, const char *payload)
     handled |= handle_uid_message(topic, payload);
     handled |= handle_signal_message(topic);
     handled |= handle_mqtt_trigger_message(topic, payload);
+    handled |= handle_sequence_message(topic, payload);
     return handled;
 }
 

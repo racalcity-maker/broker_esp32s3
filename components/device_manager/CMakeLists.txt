@@ -13,6 +13,7 @@ idf_component_register(
         "runtime/dm_runtime_flag.c"
         "runtime/dm_runtime_condition.c"
         "runtime/dm_runtime_interval.c"
+        "runtime/dm_runtime_sequence.c"
         "template_registry.c"
         "template_factory.c"
         "template_applier.c"

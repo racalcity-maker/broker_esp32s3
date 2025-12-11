@@ -135,6 +135,33 @@ This guide walks through concrete examples for every built‑in template. Each s
 
 ---
 
+## 7. Sequence Lock (ordered MQTT puzzle)
+
+**Goal:** Six touch plates publish MQTT events in order. Only the configured sequence (e.g., `plate/1` → `plate/2` → … → `plate/6`) should trigger green lights + `success.mp3`; any wrong topic or timeout should reset progress, flash red lights, and play `fail.mp3`.
+
+1. **Device creation**
+   - Device ID: `sequence_gate`
+   - Template: `Sequence Lock`
+2. **Steps**
+   - Step 1: `topic = plate/1`, `payload = touch`, `payload_required = true`
+   - Step 2: `topic = plate/2`, `payload = touch`, `payload_required = true`
+   - Continue until Step 6 with their respective topics.
+   - Optional hints: for each step set `hint_topic = hints/led`, `hint_payload = 1`, or `hint_audio_track = /sdcard/audio/hint1.mp3` so players receive feedback after a correct move.
+3. **Runtime**
+   - `timeout_ms = 8000` (resets if the next plate is not touched within 8 seconds).
+   - `reset_on_error = true` to wipe progress when any unexpected topic arrives.
+4. **Actions**
+   - Success: `success_topic = puzzle/result`, `success_payload = unlocked`, `success_audio_track = /sdcard/audio/success.mp3`, `success_scenario = unlock_sequence`.
+   - Fail: `fail_topic = puzzle/result`, `fail_payload = error`, `fail_audio_track = /sdcard/audio/fail.mp3`, `fail_scenario = reset_sequence`.
+5. **Scenarios**
+   - `unlock_sequence`: Step 1 = MQTT publish `relay/cmd` payload `open`; Step 2 = audio play `/sdcard/audio/unlocked.mp3`.
+   - `reset_sequence`: Step 1 = MQTT publish `relay/cmd` payload `lock`; Step 2 = set automation flag `sequence_ready=true`.
+6. **Verification**
+   - Publish `touch` on `plate/1` → `plate/6` in order: logs show `[Sequence] step_ok idx=0…5`, and runtime fires the success scenario.
+   - Publish any out-of-order topic: runtime logs `event=fail`, triggers the fail scenario, and the next correct attempt restarts from Step 1.
+
+---
+
 ## Web UI Tips for Template Setup
 
 - Use the **Wizard** to bootstrap devices quickly; templates map 1:1 to wizard cards.

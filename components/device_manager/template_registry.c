@@ -39,6 +39,12 @@ static const dm_template_descriptor_t s_templates[] = {
         .label = "Interval Task",
         .description = "Runs a scenario on a fixed interval.",
     },
+    {
+        .type = DM_TEMPLATE_TYPE_SEQUENCE_LOCK,
+        .id = "sequence_lock",
+        .label = "Sequence Lock",
+        .description = "Validates an ordered list of MQTT triggers with optional hints.",
+    },
 };
 
 const dm_template_descriptor_t *dm_template_registry_get_all(size_t *count)

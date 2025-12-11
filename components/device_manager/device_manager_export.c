@@ -11,6 +11,7 @@
 #include "device_manager_utils.h"
 #include "dm_template_runtime.h"
 
+// Helper: add string field if value is non-empty.
 static void template_to_json_string(cJSON *obj, const char *key, const char *value)
 {
     if (obj && key && value && value[0]) {
@@ -18,6 +19,7 @@ static void template_to_json_string(cJSON *obj, const char *key, const char *val
     }
 }
 
+// Serialize scenario step into JSON representation.
 static cJSON *step_to_json(const device_action_step_t *step)
 {
     cJSON *obj = cJSON_CreateObject();
@@ -100,6 +102,7 @@ static cJSON *step_to_json(const device_action_step_t *step)
     return obj;
 }
 
+// Convert UID template runtime state into JSON (including last-read values).
 static cJSON *uid_template_to_json(const device_descriptor_t *dev)
 {
     if (!dev) {
@@ -159,6 +162,7 @@ static cJSON *uid_template_to_json(const device_descriptor_t *dev)
     return root;
 }
 
+// Serialize signal-hold template.
 static cJSON *signal_template_to_json(const dm_signal_hold_template_t *tpl)
 {
     if (!tpl) {
@@ -308,6 +312,62 @@ static cJSON *interval_template_to_json(const dm_interval_task_template_t *tpl)
     return root;
 }
 
+static cJSON *sequence_template_to_json(const dm_sequence_template_t *tpl)
+{
+    if (!tpl) {
+        return NULL;
+    }
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        return NULL;
+    }
+    cJSON *steps = cJSON_AddArrayToObject(root, "steps");
+    if (!steps) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    for (uint8_t i = 0; i < tpl->step_count && i < DM_SEQUENCE_TEMPLATE_MAX_STEPS; ++i) {
+        const dm_sequence_step_t *step = &tpl->steps[i];
+        if (!step->topic[0]) {
+            continue;
+        }
+        cJSON *step_obj = cJSON_CreateObject();
+        if (!step_obj) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddItemToArray(steps, step_obj);
+        cJSON_AddStringToObject(step_obj, "topic", step->topic);
+        if (step->payload[0]) {
+            cJSON_AddStringToObject(step_obj, "payload", step->payload);
+        }
+        cJSON_AddBoolToObject(step_obj, "payload_required", step->payload_required);
+        if (step->hint_topic[0]) {
+            cJSON_AddStringToObject(step_obj, "hint_topic", step->hint_topic);
+        }
+        if (step->hint_payload[0]) {
+            cJSON_AddStringToObject(step_obj, "hint_payload", step->hint_payload);
+        }
+        if (step->hint_audio_track[0]) {
+            cJSON_AddStringToObject(step_obj, "hint_audio_track", step->hint_audio_track);
+        }
+    }
+    if (tpl->timeout_ms > 0) {
+        cJSON_AddNumberToObject(root, "timeout_ms", (double)tpl->timeout_ms);
+    }
+    cJSON_AddBoolToObject(root, "reset_on_error", tpl->reset_on_error);
+    template_to_json_string(root, "success_topic", tpl->success_topic);
+    template_to_json_string(root, "success_payload", tpl->success_payload);
+    template_to_json_string(root, "success_audio_track", tpl->success_audio_track);
+    template_to_json_string(root, "success_scenario", tpl->success_scenario);
+    template_to_json_string(root, "fail_topic", tpl->fail_topic);
+    template_to_json_string(root, "fail_payload", tpl->fail_payload);
+    template_to_json_string(root, "fail_audio_track", tpl->fail_audio_track);
+    template_to_json_string(root, "fail_scenario", tpl->fail_scenario);
+    return root;
+}
+
+// Attach template-specific structure into device JSON.
 static cJSON *template_to_json(const device_descriptor_t *dev)
 {
     if (!dev || !dev->template_assigned) {
@@ -357,6 +417,12 @@ static cJSON *template_to_json(const device_descriptor_t *dev)
             cJSON_AddItemToObject(root, "interval", data);
         }
         break;
+    case DM_TEMPLATE_TYPE_SEQUENCE_LOCK:
+        data = sequence_template_to_json(&dev->template_config.data.sequence);
+        if (data) {
+            cJSON_AddItemToObject(root, "sequence", data);
+        }
+        break;
     default:
         break;
     }
@@ -367,6 +433,7 @@ static cJSON *template_to_json(const device_descriptor_t *dev)
     return root;
 }
 
+// Build JSON snapshot of entire configuration; caller must free `*out_json`.
 esp_err_t dm_storage_internal_export(const device_manager_config_t *cfg, char **out_json, size_t *out_len)
 {
     if (!cfg || !out_json) {

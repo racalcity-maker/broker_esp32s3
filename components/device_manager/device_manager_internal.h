@@ -23,6 +23,7 @@ const char *dm_action_type_to_string(device_action_type_t type);
 bool dm_action_type_from_string(const char *name, device_action_type_t *out);
 
 #if CONFIG_ESP_TASK_WDT
+// Feed hardware watchdog if current task is subscribed; used in long loops.
 static inline void feed_wdt(void)
 {
     if (esp_task_wdt_status(NULL) == ESP_OK) {

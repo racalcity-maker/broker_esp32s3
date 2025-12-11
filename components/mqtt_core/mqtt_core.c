@@ -59,6 +59,7 @@ typedef struct {
     TaskHandle_t task;
     bool active;
     bool closing;
+    bool suppress_will;
     char client_id[CONFIG_STORE_CLIENT_ID_MAX];
     uint16_t keepalive;
     int64_t last_rx_ms;
@@ -852,7 +853,7 @@ static void on_event_bus_message(const event_bus_message_t *msg)
 
 static void send_will_if_needed(mqtt_session_t *sess)
 {
-    if (sess->will.has) {
+    if (sess->will.has && !sess->suppress_will) {
         ESP_LOGI(TAG, "sending will for %s", sess->client_id);
         publish_to_subscribers(sess->will.topic, sess->will.payload, sess->will.qos, sess->will.retain, sess);
     }
@@ -926,6 +927,7 @@ static void handle_client(void *param)
             send_pingresp(sess->sock);
             break;
         case 14: // DISCONNECT
+            sess->suppress_will = true;
             goto cleanup;
         default:
             ESP_LOGW(TAG, "unsupported packet type %u", type);

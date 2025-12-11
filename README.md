@@ -8,7 +8,7 @@ Firmware for the “Broker” controller: an ESP32-S3 based automation hub that 
 
 - **Self-hosted MQTT broker** with QoS0/1, retain messages, last-will support, static ACL table, and a lightweight event bus bridge. Devices connect directly to the ESP32 over Wi-Fi.
 - **Web UI** (Status, Audio, Devices, Settings) served from the firmware. Includes a form-based “Simple editor” plus a wizard for creating devices/templates without touching JSON.
-- **Device manager & templates** that live on PSRAM, while profiles and backups persist on SD card. Templates include UID validators, laser hold puzzles, MQTT/flag triggers, interval tasks, etc.
+- **Device manager & templates** that live on PSRAM, while profiles and backups persist on SD card. Templates include UID validators, laser hold timers, MQTT/flag triggers, interval tasks, and the new sequence lock for ordered MQTT puzzles.
 - **Automation engine** capable of MQTT publish, audio play/stop, flag waits, loops, delays, and event bus steps. Multiple worker tasks prevent a single scenario from blocking the rest.
 - **Audio subsystem** (I2S) for track playback, pause/resume, loop, and synchronization with scenarios.
 - **Documentation** in `docs/` describing device/template setup in EN/RU, plus tests for configuration parsing.
@@ -89,6 +89,7 @@ The manager keeps the active profile in PSRAM while writing snapshots to SD (`co
 | `on_flag` | React to automation flags toggling. | Flag name, required boolean, scenario per rule. |
 | `if_condition` | Evaluate multiple flag requirements and run true/false scenario. | Logic mode (all/any), list of flag requirements, two scenario IDs. |
 | `interval_task` | Run a scenario on a fixed period. | Scenario ID, interval in ms, optional “run immediately”. |
+| `sequence_lock` | Enforce an ordered list of MQTT triggers. | Steps (topic + optional payload/hints), timeout/reset behavior, success/fail MQTT/audio/scenario outputs. |
 
 Documentation:
 
@@ -238,3 +239,4 @@ tests/                    Standalone test applications (Unity-based).
   - Extended diagnostics (profiling automation queue latency).
 
 Pull requests and issues are welcome. Please run `idf.py build` and relevant tests before submitting changes. Continuous improvement of documentation and templates helps integrators understand the system faster.
+

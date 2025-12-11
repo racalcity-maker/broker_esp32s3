@@ -25,13 +25,18 @@
 static const char *TAG = "device_manager";
 static const char *CONFIG_BACKUP_PATH = "/sdcard/brocker_devices.json";
 
-#define DM_DEVICE_MAX DEVICE_MANAGER_MAX_DEVICES
-#define DM_SCENARIO_MAX DEVICE_MANAGER_MAX_SCENARIOS_PER_DEVICE
+#define DM_DEVICE_MAX            DEVICE_MANAGER_MAX_DEVICES
+#define DM_SCENARIO_MAX          DEVICE_MANAGER_MAX_SCENARIOS_PER_DEVICE
+#define DM_COPY_CHUNK_BYTES      512u   // Copy config in small chunks to feed WDT regularly.
+#define DM_LOCK_POLL_MS          50u    // Wait duration between lock polls while feeding WDT.
+#define DM_BOOT_RETRY_COUNT      10     // How many times to retry SD load during boot.
+#define DM_BOOT_RETRY_DELAY_MS   100u   // Delay between boot retries (ms).
 
 static SemaphoreHandle_t s_lock;
 static device_manager_config_t *s_config = NULL;
 static bool s_config_ready = false;
 
+// Returns zeroed config large enough to hold `capacity` devices in PSRAM (fallback to internal RAM).
 static device_manager_config_t *dm_config_alloc(uint8_t capacity)
 {
     if (capacity == 0) {
@@ -63,6 +68,7 @@ static size_t dm_config_device_bytes(const device_manager_config_t *cfg, uint8_t
     return sizeof(device_descriptor_t) * slots;
 }
 
+// Copies metadata + device descriptors from `src` into `dest`, throttling memcpy to avoid WDT.
 static void dm_config_clone(device_manager_config_t *dest, const device_manager_config_t *src)
 {
     if (!dest || !src) {
@@ -81,7 +87,7 @@ static void dm_config_clone(device_manager_config_t *dest, const device_manager_
              meta + device_bytes,
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    const size_t chunk = 512;
+    const size_t chunk = DM_COPY_CHUNK_BYTES;
     size_t offset = 0;
     uint8_t *dst_bytes = (uint8_t *)dest;
     const uint8_t *src_bytes = (const uint8_t *)src;
@@ -118,6 +124,7 @@ static void dm_config_clone(device_manager_config_t *dest, const device_manager_
 
 static void *dm_cjson_malloc(size_t size);
 static void dm_cjson_free(void *ptr);
+// Install cJSON hooks so large JSON structures use PSRAM where possible.
 void dm_cjson_install_hooks(void)
 {
     cJSON_Hooks hooks = {
@@ -127,6 +134,7 @@ void dm_cjson_install_hooks(void)
     cJSON_InitHooks(&hooks);
 }
 
+// Restore default cJSON allocators to avoid affecting other modules.
 void dm_cjson_reset_hooks(void)
 {
     cJSON_InitHooks(NULL);
@@ -152,10 +160,11 @@ static void register_templates_from_config(device_manager_config_t *cfg);
 
 
 
+// Global device-manager lock; poll with timeout so we can feed WDT while waiting.
 static void dm_lock(void)
 {
     if (s_lock) {
-        while (xSemaphoreTake(s_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        while (xSemaphoreTake(s_lock, pdMS_TO_TICKS(DM_LOCK_POLL_MS)) != pdTRUE) {
             feed_wdt();
         }
     }
@@ -168,6 +177,7 @@ static void dm_unlock(void)
     }
 }
 
+// Recreate runtime instances for every template in the active config.
 static void register_templates_from_config(device_manager_config_t *cfg)
 {
     if (!cfg) {
@@ -249,9 +259,9 @@ esp_err_t device_manager_init(void)
     }
     register_templates_from_config(s_config);
     ESP_LOGI(TAG, "device_manager_init finished successfully");
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < DM_BOOT_RETRY_COUNT; ++i) {
         feed_wdt();
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(DM_BOOT_RETRY_DELAY_MS));
     }
     ESP_LOGI(TAG, "device_manager_init done");
     return ESP_OK;
@@ -268,6 +278,7 @@ void device_manager_unlock_config(void)
     dm_unlock();
 }
 
+// Re-read JSON config from SD card and swap active configuration.
 esp_err_t device_manager_reload_from_nvs(void)
 {
     if (!s_config_ready) {
@@ -297,6 +308,7 @@ esp_err_t device_manager_reload_from_nvs(void)
     return ESP_OK;
 }
 
+// s_config must be locked before calling; writes active profile + JSON backup to disk.
 static esp_err_t persist_locked(void)
 {
     uint8_t cap = s_config ? s_config->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
@@ -318,6 +330,7 @@ static esp_err_t persist_locked(void)
     return err;
 }
 
+// Persist active profile + JSON backup. Safe to call while system runs.
 esp_err_t device_manager_save_snapshot(void)
 {
     if (!s_config_ready) {
@@ -332,6 +345,7 @@ esp_err_t device_manager_save_snapshot(void)
     return err;
 }
 
+// Apply new config struct (already validated) and persist it to SD.
 esp_err_t device_manager_apply(const device_manager_config_t *next)
 {
     if (!next || !s_config_ready) {
@@ -419,6 +433,7 @@ esp_err_t device_manager_export_profile_json(const char *profile_id, char **out_
     return err;
 }
 
+// Parse JSON and replace either active profile or the supplied profile id.
 esp_err_t device_manager_apply_profile_json(const char *profile_id, const char *json, size_t len)
 {
     if (!json || len == 0) {
@@ -596,6 +611,7 @@ esp_err_t device_manager_profile_activate(const char *id)
     return err;
 }
 
+// Convenience wrapper for updating active profile via JSON blob.
 esp_err_t device_manager_apply_json(const char *json, size_t len)
 {
     return device_manager_apply_profile_json(NULL, json, len);

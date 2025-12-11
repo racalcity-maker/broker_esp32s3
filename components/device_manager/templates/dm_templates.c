@@ -241,3 +241,12 @@ void dm_interval_task_template_clear(dm_interval_task_template_t *tpl)
     memset(tpl, 0, sizeof(*tpl));
     tpl->interval_ms = 1000;
 }
+
+void dm_sequence_template_clear(dm_sequence_template_t *tpl)
+{
+    if (!tpl) {
+        return;
+    }
+    memset(tpl, 0, sizeof(*tpl));
+    tpl->reset_on_error = true;
+}

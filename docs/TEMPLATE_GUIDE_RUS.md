@@ -139,6 +139,33 @@
 
 ---
 
+## 7. Sequence Lock (последовательный MQTT-пазл)
+
+**Цель:** Шесть сенсорных площадок отправляют MQTT-сообщения plate/1 … plate/6. Игроки должны пройти их в правильном порядке; верная последовательность включает зелёный свет и success.mp3, любая ошибка или таймаут сбрасывает прогресс, зажигает красный свет и ail.mp3.
+
+1. **Создание устройства**
+   - Device ID: sequence_gate`r
+   - Template: Sequence Lock`r
+2. **Шаги**
+   - Шаг 1: 	opic = plate/1, payload = touch, payload_required = true`r
+   - Шаг 2: 	opic = plate/2, payload = touch, payload_required = true`r
+   - Продолжайте до шага 6 со своими топиками.
+   - При желании добавьте подсказки: hint_topic = hints/led, hint_payload = 1, hint_audio_track = /sdcard/audio/hint1.mp3, чтобы игроки сразу видели правильный ход.
+3. **Параметры рантайма**
+   - 	imeout_ms = 8000 — если следующий шаг не приходит в течение 8 секунд, прогресс сбрасывается.
+   - eset_on_error = true — любая лишняя тема мгновенно возвращает последовательность к шагу 1.
+4. **Действия**
+   - Success: success_topic = puzzle/result, success_payload = unlocked, success_audio_track = /sdcard/audio/success.mp3, success_scenario = unlock_sequence.
+   - Fail: ail_topic = puzzle/result, ail_payload = error, ail_audio_track = /sdcard/audio/fail.mp3, ail_scenario = reset_sequence.
+5. **Сценарии**
+   - unlock_sequence: шаг 1 — MQTT elay/cmd с open; шаг 2 — воспроизвести /sdcard/audio/unlocked.mp3.
+   - eset_sequence: шаг 1 — MQTT elay/cmd с lock; шаг 2 — set_flag sequence_ready=true.
+6. **Проверка**
+   - Отправьте 	ouch последовательно на plate/1…plate/6: в логе появятся строки [Sequence] step_ok …, запустится success-сценарий.
+   - Отправьте сообщение не в том порядке: лог покажет event=fail, запустится fail-сценарий, следующая попытка снова начнётся с шага 1.
+
+---
+
 ## РЎРѕРІРµС‚С‹ РїРѕ РЅР°СЃС‚СЂРѕР№РєРµ РІ РІРµР±-РёРЅС‚РµСЂС„РµР№СЃРµ
 
 - РСЃРїРѕР»СЊР·СѓР№С‚Рµ **Wizard** РґР»СЏ Р±С‹СЃС‚СЂРѕРіРѕ СЃРѕР·РґР°РЅРёСЏ СѓСЃС‚СЂРѕР№СЃС‚РІР° вЂ” РєР°Р¶РґР°СЏ РєР°СЂС‚РѕС‡РєР° РјР°СЃС‚РµСЂР° СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓРµС‚ РѕРґРЅРѕРјСѓ С€Р°Р±Р»РѕРЅСѓ.
@@ -157,3 +184,4 @@
 | 4 | Р—Р°РїСѓСЃРєР°Р№С‚Рµ СЃС†РµРЅР°СЂРёРё РІСЂСѓС‡РЅСѓСЋ С‡РµСЂРµР· `/api/devices/run?device=<id>&scenario=<id>`. |
 
 РљРѕРјР±РёРЅРёСЂСѓР№С‚Рµ С€Р°Р±Р»РѕРЅС‹: СѓСЃРїРµС€РЅС‹Р№ UID РјРѕР¶РµС‚ СЃС‚Р°РІРёС‚СЊ С„Р»Р°Рі РґР»СЏ `if_condition`, Р° `interval_task` Р±СѓРґРµС‚ РЅР°РїРѕРјРёРЅР°С‚СЊ СѓС‡Р°СЃС‚РЅРёРєР°Рј РєР°Р¶РґС‹Рµ РЅРµСЃРєРѕР»СЊРєРѕ СЃРµРєСѓРЅРґ.
+
