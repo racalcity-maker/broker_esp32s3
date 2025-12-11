@@ -1,8 +1,4 @@
 (() => {
-const TAB_TYPES = [
-  {value: 'audio', label: 'Audio'},
-  {value: 'custom', label: 'Custom'},
-];
 const ACTION_TYPES = ['mqtt_publish','audio_play','audio_stop','set_flag','wait_flags','loop','delay','event','nop'];
 const TEMPLATE_TYPES = [
   {value: '', label: 'No template'},
@@ -12,9 +8,11 @@ const TEMPLATE_TYPES = [
   {value: 'on_flag', label: 'Flag trigger'},
   {value: 'if_condition', label: 'Conditional scenario'},
   {value: 'interval_task', label: 'Interval task'},
+  {value: 'sequence_lock', label: 'Sequence lock'},
 ];
 const MQTT_RULE_LIMIT = 8;
 const FLAG_RULE_LIMIT = 8;
+const SEQUENCE_STEP_LIMIT = 8;
 const WIZARD_TEMPLATES = {
   blank_device: {
     label: 'Blank Device',
@@ -25,7 +23,6 @@ const WIZARD_TEMPLATES = {
     fields: [],
     build(base) {
       base.scenarios = [];
-      base.tabs = [];
       base.topics = [];
       return base;
     },
@@ -37,13 +34,20 @@ const state = {
   toolbar: null,
   list: null,
   detail: null,
+  profileList: null,
+  profileActions: null,
   json: null,
+  jsonWrap: null,
   statusEl: null,
   model: null,
+  profiles: [],
+  activeProfile: '',
+  actionsRoot: null,
   selectedDevice: -1,
   selectedScenario: -1,
   busy: false,
   dirty: false,
+  jsonVisible: false,
   wizard: {
     open: false,
     step: 0,
@@ -57,6 +61,7 @@ const state = {
 
 function init() {
   state.root = document.getElementById('device_wizard_root');
+  state.actionsRoot = document.getElementById('actions_root');
   if (!state.root) {
     return;
   }
@@ -70,15 +75,22 @@ function init() {
 function buildShell() {
   state.root.innerHTML = `
     <div class="dw-root">
-      <div class="dw-globals">
-        <div class="dw-field">
-          <label>Tab limit</label>
-          <input type="number" min="1" max="12" id="dw_tab_limit">
+      <div class="dw-profile-bar">
+        <div class="dw-profile-list" id="dw_profile_list"></div>
+        <div class="dw-profile-actions">
+          <button class="secondary" data-action="profile-add">Add</button>
+          <button class="secondary" data-action="profile-clone">Clone</button>
+          <button class="secondary" data-action="profile-download">Download</button>
+          <button class="secondary" data-action="profile-rename">Rename</button>
+          <button class="danger" data-action="profile-delete">Delete</button>
         </div>
-        <div class="dw-field">
+      </div>
+      <div class="dw-meta-row">
+        <div class="dw-field dw-schema-field">
           <label>Schema version</label>
           <input type="number" id="dw_schema" disabled>
         </div>
+        <button class="secondary" data-action="toggle-json">Show JSON</button>
       </div>
       <div class="dw-toolbar" id="dw_toolbar">
         <button class="secondary" data-action="reload">Reload</button>
@@ -93,7 +105,9 @@ function buildShell() {
         <div class="dw-list" id="dw_device_list"></div>
         <div class="dw-detail" id="dw_device_detail"></div>
       </div>
-      <div class="dw-json" id="dw_json_preview">No config</div>
+      <div class="dw-json collapsed" id="dw_json_panel">
+        <pre class="dw-json-content" id="dw_json_preview">No config</pre>
+      </div>
       <div class="dw-modal hidden" id="dw_wizard_modal">
         <div class="dw-modal-content" id="dw_wizard_content"></div>
       </div>
@@ -103,23 +117,12 @@ function buildShell() {
   state.list = document.getElementById('dw_device_list');
   state.detail = document.getElementById('dw_device_detail');
   state.json = document.getElementById('dw_json_preview');
+  state.jsonWrap = document.getElementById('dw_json_panel');
   state.statusEl = document.getElementById('dw_status');
   state.wizardModal = document.getElementById('dw_wizard_modal');
   state.wizardContent = document.getElementById('dw_wizard_content');
-
-  const tabLimit = document.getElementById('dw_tab_limit');
-  tabLimit?.addEventListener('input', (ev) => {
-    if (!state.model) return;
-    const target = ev.target;
-    if (!target || typeof target.value === 'undefined') {
-      return;
-    }
-    const val = parseInt(String(target.value), 10);
-    if (!isNaN(val)) {
-      state.model.tab_limit = Math.max(1, Math.min(12, val));
-      markDirty();
-    }
-  });
+  state.profileList = document.getElementById('dw_profile_list');
+  state.profileActions = state.root.querySelector('.dw-profile-actions');
 }
 
 function attachEvents() {
@@ -145,7 +148,46 @@ function attachEvents() {
       case 'save':
         saveModel();
         break;
+      default:
+        break;
     }
+  });
+
+  state.profileActions?.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-action]');
+    if (!btn) return;
+    switch (btn.dataset.action) {
+      case 'profile-add':
+        createProfile();
+        break;
+      case 'profile-clone':
+        cloneProfile();
+        break;
+      case 'profile-download':
+        downloadProfile();
+        break;
+      case 'profile-rename':
+        renameProfile();
+        break;
+      case 'profile-delete':
+        deleteProfile();
+        break;
+      default:
+        break;
+    }
+  });
+
+  const jsonToggle = state.root.querySelector('[data-action="toggle-json"]');
+  jsonToggle?.addEventListener('click', toggleJsonPanel);
+  state.profileList?.addEventListener('click', (ev) => {
+    const chip = ev.target.closest('[data-profile-id]');
+    if (!chip) return;
+    activateProfile(chip.dataset.profileId || '');
+  });
+  state.actionsRoot?.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-run-device][data-run-scenario]');
+    if (!btn) return;
+    runScenario(btn.dataset.runDevice, btn.dataset.runScenario);
   });
 
   state.list?.addEventListener('click', (ev) => {
@@ -163,12 +205,20 @@ function attachEvents() {
   state.detail?.addEventListener('change', handleDetailInput);
   state.detail?.addEventListener('click', handleDetailClick);
 
-  const runBtn = document.getElementById('device_run_btn');
-  runBtn?.addEventListener('click', runScenario);
-  const devSelect = document.getElementById('device_run_select');
-  devSelect?.addEventListener('change', populateScenarioSelect);
   state.wizardModal?.addEventListener('click', handleWizardClick);
   state.wizardModal?.addEventListener('input', handleWizardInput);
+}
+
+function toggleJsonPanel() {
+  state.jsonVisible = !state.jsonVisible;
+  if (state.jsonWrap) {
+    state.jsonWrap.classList.toggle('collapsed', !state.jsonVisible);
+  }
+  const btn = state.root?.querySelector('[data-action="toggle-json"]');
+  if (btn) {
+    btn.textContent = state.jsonVisible ? 'Hide JSON' : 'Show JSON';
+  }
+  renderJson();
 }
 
 function handleDetailClick(ev) {
@@ -176,8 +226,6 @@ function handleDetailClick(ev) {
   if (!btn) return;
   const action = btn.dataset.action;
   switch (action) {
-    case 'add-tab': addTab(); break;
-    case 'remove-tab': removeTab(btn.dataset.index); break;
     case 'add-topic': addTopic(); break;
     case 'remove-topic': removeTopic(btn.dataset.index); break;
     case 'add-scenario': addScenario(); break;
@@ -197,6 +245,8 @@ function handleDetailClick(ev) {
     case 'flag-rule-remove': removeFlagRule(btn.dataset.index); break;
     case 'condition-rule-add': addConditionRule(); break;
     case 'condition-rule-remove': removeConditionRule(btn.dataset.index); break;
+    case 'sequence-step-add': addSequenceStep(); break;
+    case 'sequence-step-remove': removeSequenceStep(btn.dataset.index); break;
   }
 }
 
@@ -207,16 +257,12 @@ function handleDetailInput(ev) {
     updateDeviceField(el.dataset.deviceField, el.value);
     return;
   }
-  if (el.dataset.tabField) {
-    updateTabField(el.dataset.index, el.dataset.tabField, el.value);
-    return;
-  }
   if (el.dataset.topicField) {
     updateTopicField(el.dataset.index, el.dataset.topicField, el.value);
     return;
   }
   if (el.dataset.scenarioField) {
-    updateScenarioField(el.dataset.scenarioField, el.value);
+    updateScenarioField(el.dataset.scenarioField, el);
     return;
   }
   if (el.dataset.stepField) {
@@ -231,4 +277,3 @@ function handleDetailInput(ev) {
     updateWaitField(el.dataset.stepIndex, el.dataset.reqIndex, el.dataset.waitField, el);
   }
 }
-

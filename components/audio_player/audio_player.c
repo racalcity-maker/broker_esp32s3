@@ -28,16 +28,16 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// I2S pins for PCM5102A. Replace with your board wiring.
-#define I2S_BCK_PIN 4
-#define I2S_WS_PIN  5
-#define I2S_DATA_PIN 6
+// I2S pins for PCM5102A. Configurable via menuconfig defaults.
+#define I2S_BCK_PIN  CONFIG_BROKER_I2S_BCK_PIN
+#define I2S_WS_PIN   CONFIG_BROKER_I2S_WS_PIN
+#define I2S_DATA_PIN CONFIG_BROKER_I2S_DATA_PIN
 
-// SD card (SPI mode) pins. Replace with your wiring.
-#define SD_PIN_MISO 13
-#define SD_PIN_MOSI 11
-#define SD_PIN_CLK  12
-#define SD_PIN_CS   10
+// SD card (SPI mode) pins.
+#define SD_PIN_MISO CONFIG_BROKER_SD_MISO_PIN
+#define SD_PIN_MOSI CONFIG_BROKER_SD_MOSI_PIN
+#define SD_PIN_CLK  CONFIG_BROKER_SD_CLK_PIN
+#define SD_PIN_CS   CONFIG_BROKER_SD_CS_PIN
 
 #define AUDIO_SAMPLE_RATE 44100
 #define AUDIO_BITS        I2S_DATA_BIT_WIDTH_16BIT

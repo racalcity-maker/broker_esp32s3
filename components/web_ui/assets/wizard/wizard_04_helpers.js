@@ -47,14 +47,11 @@ function updateDeviceField(field, value) {
   const dev = currentDevice();
   if (!dev) return;
   dev[field] = value;
-  markDirty();
-}
-
-function updateTabField(indexStr, field, value) {
-  const idx = parseInt(indexStr, 10);
-  const dev = currentDevice();
-  if (!dev || isNaN(idx) || !dev.tabs || !dev.tabs[idx]) return;
-  dev.tabs[idx][field] = value;
+  if (field === 'display_name') {
+    dev.name = value;
+  } else if (field === 'name' && !dev.display_name) {
+    dev.display_name = value;
+  }
   markDirty();
 }
 
@@ -186,16 +183,62 @@ function updateTemplateField(el) {
       }
       break;
     }
+    case 'sequence-step': {
+      ensureSequenceTemplate(dev);
+      const tpl = dev.template?.sequence;
+      if (!tpl) return;
+      const idx = parseInt(el.dataset.index, 10);
+      if (Number.isNaN(idx) || !tpl.steps[idx]) return;
+      const sub = el.dataset.subfield;
+      if (sub === 'payload_required') {
+        tpl.steps[idx].payload_required = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else {
+        tpl.steps[idx][sub] = el.value;
+      }
+      break;
+    }
+    case 'sequence': {
+      ensureSequenceTemplate(dev);
+      const tpl = dev.template?.sequence;
+      if (!tpl) return;
+      const sub = el.dataset.subfield;
+      if (sub === 'timeout_ms') {
+        const val = parseInt(el.value, 10);
+        const next = Number.isNaN(val) ? 0 : Math.max(val, 0);
+        tpl.timeout_ms = next;
+        el.value = next;
+      } else if (sub === 'reset_on_error') {
+        tpl.reset_on_error = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else {
+        tpl[sub] = el.value;
+      }
+      break;
+    }
     default:
       return;
   }
   markDirty();
 }
 
-function updateScenarioField(field, value) {
+function updateScenarioField(field, el) {
   const scen = currentScenario();
-  if (!scen) return;
-  scen[field] = value;
+  if (!scen || !el) return;
+  switch (field) {
+    case 'button_enabled': {
+      scen.button_enabled = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      if (!scen.button_enabled) {
+        scen.button_label = '';
+      }
+      renderDeviceDetail();
+      break;
+    }
+    case 'button_label':
+      scen.button_label = el.value;
+      break;
+    default:
+      scen[field] = el.value;
+      break;
+  }
   markDirty();
 }
 
@@ -243,7 +286,13 @@ function updateWaitField(stepIdxStr, reqIdxStr, field, el) {
 function setDeviceTemplate(dev, type) {
   if (!dev) return;
   let nextType = type || '';
-  const allowed = ['uid_validator', 'signal_hold', 'on_mqtt_event', 'on_flag', 'if_condition', 'interval_task'];
+  const allowed = ['uid_validator',
+                   'signal_hold',
+                   'on_mqtt_event',
+                   'on_flag',
+                   'if_condition',
+                   'interval_task',
+                   'sequence_lock'];
   if (!allowed.includes(nextType)) {
     dev.template = null;
     markDirty();
@@ -281,6 +330,11 @@ function setDeviceTemplate(dev, type) {
         type: nextType,
         interval: defaultIntervalTemplate(),
       };
+    } else if (nextType === 'sequence_lock') {
+      dev.template = {
+        type: nextType,
+        sequence: defaultSequenceTemplate(),
+      };
     }
   }
   if (nextType === 'uid_validator') {
@@ -295,6 +349,8 @@ function setDeviceTemplate(dev, type) {
     ensureConditionTemplate(dev);
   } else if (nextType === 'interval_task') {
     ensureIntervalTemplate(dev);
+  } else if (nextType === 'sequence_lock') {
+    ensureSequenceTemplate(dev);
   }
   markDirty();
   renderDeviceDetail();
@@ -352,6 +408,22 @@ function defaultIntervalTemplate() {
   return {
     interval_ms: 1000,
     scenario: '',
+  };
+}
+
+function defaultSequenceTemplate() {
+  return {
+    steps: [],
+    timeout_ms: 0,
+    reset_on_error: true,
+    success_topic: '',
+    success_payload: '',
+    success_audio_track: '',
+    success_scenario: '',
+    fail_topic: '',
+    fail_payload: '',
+    fail_audio_track: '',
+    fail_scenario: '',
   };
 }
 
@@ -469,6 +541,36 @@ function ensureIntervalTemplate(dev) {
     dev.template.interval.interval_ms = 1000;
   }
   dev.template.interval.scenario = dev.template.interval.scenario || '';
+}
+
+function ensureSequenceTemplate(dev) {
+  if (!dev || !dev.template || dev.template.type !== 'sequence_lock') {
+    return;
+  }
+  if (!dev.template.sequence) {
+    dev.template.sequence = defaultSequenceTemplate();
+  }
+  const seq = dev.template.sequence;
+  if (!Array.isArray(seq.steps)) {
+    seq.steps = [];
+  }
+  seq.steps.forEach((step) => {
+    step.topic = step.topic || '';
+    step.payload = step.payload || '';
+    step.payload_required = !!step.payload_required;
+    step.hint_topic = step.hint_topic || '';
+    step.hint_payload = step.hint_payload || '';
+    step.hint_audio_track = step.hint_audio_track || '';
+  });
+  seq.timeout_ms = seq.timeout_ms || 0;
+  if (seq.reset_on_error === undefined) {
+    seq.reset_on_error = true;
+  }
+  ['success_topic','success_payload','success_audio_track','success_scenario','fail_topic','fail_payload','fail_audio_track','fail_scenario'].forEach((key) => {
+    if (typeof seq[key] !== 'string') {
+      seq[key] = '';
+    }
+  });
 }
 
 function addTemplateSlot() {
@@ -604,6 +706,44 @@ function removeConditionRule(indexStr) {
   renderDeviceDetail();
 }
 
+function addSequenceStep() {
+  const dev = currentDevice();
+  if (!dev || dev.template?.type !== 'sequence_lock') {
+    return;
+  }
+  ensureSequenceTemplate(dev);
+  const tpl = dev.template.sequence;
+  if (tpl.steps.length >= SEQUENCE_STEP_LIMIT) {
+    setStatus('Step limit reached', '#fbbf24');
+    return;
+  }
+  tpl.steps.push({
+    topic: '',
+    payload: '',
+    payload_required: false,
+    hint_topic: '',
+    hint_payload: '',
+    hint_audio_track: '',
+  });
+  markDirty();
+  renderDeviceDetail();
+}
+
+function removeSequenceStep(indexStr) {
+  const dev = currentDevice();
+  if (!dev || dev.template?.type !== 'sequence_lock') {
+    return;
+  }
+  ensureSequenceTemplate(dev);
+  const idx = parseInt(indexStr, 10);
+  if (Number.isNaN(idx)) {
+    return;
+  }
+  dev.template.sequence.steps.splice(idx, 1);
+  markDirty();
+  renderDeviceDetail();
+}
+
 function addWaitRule(stepIdxStr) {
   const idx = parseInt(stepIdxStr, 10);
   const scen = currentScenario();
@@ -650,6 +790,12 @@ function normalizeLoadedConfig(cfg) {
 
 function normalizeDevice(dev) {
   if (!dev || typeof dev !== 'object') return;
+  if (!dev.display_name) {
+    dev.display_name = dev.name || dev.id || '';
+  }
+  if (!dev.name && dev.display_name) {
+    dev.name = dev.display_name;
+  }
   if (!Array.isArray(dev.scenarios)) {
     dev.scenarios = [];
   }
@@ -658,6 +804,10 @@ function normalizeDevice(dev) {
 
 function normalizeScenario(scen) {
   if (!scen || typeof scen !== 'object') return;
+  scen.button_enabled = !!scen.button_enabled;
+  if (typeof scen.button_label !== 'string') {
+    scen.button_label = '';
+  }
   if (!Array.isArray(scen.steps)) {
     scen.steps = [];
   }
@@ -724,4 +874,3 @@ function normalizeStepForEditing(step) {
       break;
   }
 }
-

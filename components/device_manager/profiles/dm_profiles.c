@@ -11,45 +11,22 @@
 #include <inttypes.h>
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 #include "device_manager_utils.h"
 
 #define DM_PROFILE_STORAGE_DIR "/sdcard/.dm_profiles"
 #define DM_PROFILE_STORAGE_EXT ".bin"
 #define DM_PROFILE_MAGIC       0x44504647u
-#define DM_PROFILE_VERSION     2u
+#define DM_PROFILE_VERSION     3u
 #define DM_PROFILE_PATH_MAX    128
+#define DM_PROFILE_LEGACY_MAX_TABS 12
 
 typedef struct {
     uint32_t magic;
     uint32_t version;
     uint32_t device_count;
 } dm_profile_file_header_t;
-
-typedef struct {
-    dm_template_type_t type;
-    union {
-        dm_uid_template_t uid;
-        dm_signal_hold_template_t signal;
-        dm_mqtt_trigger_template_t mqtt;
-        dm_flag_trigger_template_t flag;
-        dm_condition_template_t condition;
-        dm_interval_task_template_t interval;
-    } data;
-} dm_template_config_v1_t;
-
-typedef struct {
-    char id[DEVICE_MANAGER_ID_MAX_LEN];
-    char display_name[DEVICE_MANAGER_NAME_MAX_LEN];
-    uint8_t tab_count;
-    device_tab_t tabs[DEVICE_MANAGER_MAX_TABS];
-    uint8_t topic_count;
-    device_topic_binding_t topics[DEVICE_MANAGER_MAX_TOPICS_PER_DEVICE];
-    uint8_t scenario_count;
-    device_scenario_t scenarios[DEVICE_MANAGER_MAX_SCENARIOS_PER_DEVICE];
-    bool template_assigned;
-    dm_template_config_v1_t template_config;
-} device_descriptor_v1_t;
 
 static const char *TAG = "dm_profiles";
 
@@ -90,25 +67,14 @@ static esp_err_t make_profile_path(const char *id, char *out, size_t out_size)
 
 typedef void (*dm_profile_record_converter_t)(const void *src, device_descriptor_t *dst);
 
-// v2 record matches current struct, so just memcpy.
-static void convert_device_v2(const void *src, device_descriptor_t *dst)
+// Current record matches struct layout.
+static void convert_device_current(const void *src, device_descriptor_t *dst)
 {
     if (!src || !dst) {
         return;
     }
     const device_descriptor_t *cur = (const device_descriptor_t *)src;
     memcpy(dst, cur, sizeof(device_descriptor_t));
-}
-
-// v1 lacked the sequence template; zero the new fields.
-static void convert_device_v1(const void *src, device_descriptor_t *dst)
-{
-    if (!src || !dst) {
-        return;
-    }
-    const device_descriptor_v1_t *legacy = (const device_descriptor_v1_t *)src;
-    memset(dst, 0, sizeof(*dst));
-    memcpy(dst, legacy, sizeof(*legacy));
 }
 
 // Generic reader that streams `raw_count` records of size `record_size`
@@ -124,13 +90,6 @@ static esp_err_t read_device_records(FILE *fp,
 {
     if (!fp || !path || !devices || !out_count || !convert || record_size == 0) {
         return ESP_ERR_INVALID_ARG;
-    }
-    if (record_size > sizeof(device_descriptor_t)) {
-        ESP_LOGE(TAG, "profile %s record size %zu exceeds descriptor size %zu",
-                 path,
-                 record_size,
-                 sizeof(device_descriptor_t));
-        return ESP_ERR_INVALID_SIZE;
     }
     uint8_t *raw_buf = malloc(record_size);
     if (!raw_buf) {
@@ -161,6 +120,65 @@ static esp_err_t read_device_records(FILE *fp,
     free(raw_buf);
     *out_count = (uint8_t)stored;
     return ESP_OK;
+}
+
+static esp_err_t read_variable_records(FILE *fp,
+                                       const char *path,
+                                       uint32_t raw_count,
+                                       size_t expected_size,
+                                       device_descriptor_t *devices,
+                                       uint8_t capacity,
+                                       uint8_t *out_count,
+                                       dm_profile_record_converter_t convert)
+{
+    long data_start = ftell(fp);
+    if (data_start < 0) {
+        ESP_LOGE(TAG, "profile %s start offset unknown", path);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        ESP_LOGE(TAG, "profile %s seek end failed", path);
+        return ESP_ERR_INVALID_STATE;
+    }
+    long data_end = ftell(fp);
+    if (data_end < 0 || data_end <= data_start) {
+        ESP_LOGE(TAG, "profile %s invalid size markers", path);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (fseek(fp, data_start, SEEK_SET) != 0) {
+        ESP_LOGE(TAG, "profile %s seek restore failed", path);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (raw_count == 0) {
+        *out_count = 0;
+        memset(devices, 0, sizeof(device_descriptor_t) * capacity);
+        return ESP_OK;
+    }
+    size_t bytes = (size_t)(data_end - data_start);
+    size_t record_size = bytes / raw_count;
+    if (record_size < expected_size) {
+        ESP_LOGE(TAG,
+                 "profile %s record size too small (%zu vs %zu)",
+                 path,
+                 record_size,
+                 expected_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (record_size != expected_size) {
+        ESP_LOGW(TAG,
+                 "profile %s adjusted record size %zu (expected %zu)",
+                 path,
+                 record_size,
+                 expected_size);
+    }
+    return read_device_records(fp,
+                               path,
+                               raw_count,
+                               record_size,
+                               devices,
+                               capacity,
+                               out_count,
+                               convert);
 }
 
 // Persist `count` descriptors for profile `id` to the SD card.
@@ -239,16 +257,16 @@ static esp_err_t read_devices(const char *id,
                                      devices,
                                      capacity,
                                      out_count,
-                                     convert_device_v2);
-    } else if (hdr.version == 1u) {
-        result = read_device_records(fp,
-                                     path,
-                                     hdr.device_count,
-                                     sizeof(device_descriptor_v1_t),
-                                     devices,
-                                     capacity,
-                                     out_count,
-                                     convert_device_v1);
+                                     convert_device_current);
+    } else if (hdr.version == 2u) {
+        result = read_variable_records(fp,
+                                       path,
+                                       hdr.device_count,
+                                       sizeof(device_descriptor_t),
+                                       devices,
+                                       capacity,
+                                       out_count,
+                                       convert_device_current);
     } else {
         ESP_LOGE(TAG, "profile %s unsupported version %" PRIu32, path, hdr.version);
         result = ESP_ERR_INVALID_VERSION;
@@ -385,7 +403,13 @@ esp_err_t dm_profiles_load_profile(const char *profile_id,
     if (!profile_id || !profile_id[0] || !devices || !device_count || capacity == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    return read_devices(profile_id, devices, capacity, device_count);
+    char path[DM_PROFILE_PATH_MAX];
+    esp_err_t err = make_profile_path(profile_id, path, sizeof(path));
+    if (err != ESP_OK) {
+        return err;
+    }
+    esp_err_t result = read_devices(profile_id, devices, capacity, device_count);
+    return result;
 }
 
 // Remove on-disk profile, ignoring ENOENT.
@@ -406,5 +430,54 @@ esp_err_t dm_profiles_delete_profile_file(const char *profile_id)
         ESP_LOGW(TAG, "unlink %s failed: %d", path, errno);
         return ESP_FAIL;
     }
+    return ESP_OK;
+}
+
+esp_err_t dm_profiles_export_raw(const char *profile_id, uint8_t **out_data, size_t *out_size)
+{
+    if (!out_data || !out_size) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_data = NULL;
+    *out_size = 0;
+    if (!profile_id || !profile_id[0]) {
+        profile_id = DM_DEFAULT_PROFILE_ID;
+    }
+    char path[DM_PROFILE_PATH_MAX];
+    esp_err_t err = make_profile_path(profile_id, path, sizeof(path));
+    if (err != ESP_OK) {
+        return err;
+    }
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        ESP_LOGE(TAG, "profile %s not found", path);
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return ESP_ERR_INVALID_STATE;
+    }
+    long size = ftell(fp);
+    if (size <= 0) {
+        fclose(fp);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t *buf = heap_caps_malloc((size_t)size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        fclose(fp);
+        return ESP_ERR_NO_MEM;
+    }
+    size_t read = fread(buf, 1, (size_t)size, fp);
+    fclose(fp);
+    if (read != (size_t)size) {
+        heap_caps_free(buf);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    *out_data = buf;
+    *out_size = (size_t)size;
     return ESP_OK;
 }

@@ -10,8 +10,17 @@ function prepareConfigForSave(model) {
       return;
     }
     snapshot.devices[devIdx].scenarios = dev.scenarios.map(serializeScenarioForSave);
+    const displayName = toSafeString(dev.display_name || dev.name || dev.id || 'Device');
+    snapshot.devices[devIdx].display_name = displayName;
+    snapshot.devices[devIdx].name = displayName;
     stripTemplateRuntimeFields(snapshot.devices[devIdx]);
+    if (snapshot.devices[devIdx].tabs) {
+      delete snapshot.devices[devIdx].tabs;
+    }
   });
+  if (snapshot.tab_limit !== undefined) {
+    delete snapshot.tab_limit;
+  }
   return snapshot;
 }
 
@@ -127,8 +136,8 @@ function addDevice() {
   ensureModel();
   state.model.devices.push({
     id: `device_${Date.now().toString(16)}`,
+    name: 'New device',
     display_name: 'New device',
-    tabs: [],
     topics: [],
     scenarios: [],
   });
@@ -165,24 +174,6 @@ function deleteDevice() {
   }
   markDirty();
   renderAll();
-}
-
-function addTab() {
-  const dev = currentDevice();
-  if (!dev) return;
-  dev.tabs = dev.tabs || [];
-  dev.tabs.push({type: 'custom', label: 'Tab', extra_payload: ''});
-  markDirty();
-  renderDeviceDetail();
-}
-
-function removeTab(indexStr) {
-  const idx = parseInt(indexStr, 10);
-  const dev = currentDevice();
-  if (!dev || isNaN(idx) || !dev.tabs) return;
-  dev.tabs.splice(idx, 1);
-  markDirty();
-  renderDeviceDetail();
 }
 
 function addTopic() {
@@ -269,6 +260,9 @@ function renderJson() {
     return;
   }
   state.json.textContent = JSON.stringify(state.model, null, 2);
+  if (state.jsonWrap) {
+    state.jsonWrap.classList.toggle('collapsed', !state.jsonVisible);
+  }
 }
 
 function updateToolbar() {
@@ -281,8 +275,6 @@ function updateToolbar() {
 }
 
 function updateGlobals() {
-  const tabLimit = document.getElementById('dw_tab_limit');
-  if (tabLimit && state.model) tabLimit.value = state.model.tab_limit ?? 12;
   const schema = document.getElementById('dw_schema');
   if (schema && state.model) schema.value = state.model.schema ?? state.model.schema_version ?? 1;
 }
@@ -315,29 +307,116 @@ function setStatus(text, color) {
   if (color) state.statusEl.style.color = color;
 }
 
-function updateRunSelectors() {
-  const devSel = document.getElementById('device_run_select');
-  const scenSel = document.getElementById('scenario_run_select');
-  if (!devSel || !scenSel || !state.model) return;
-  devSel.innerHTML = '<option value="">Device</option>';
-  const devices = state.model.devices || [];
-  if (!devices.length) {
-    scenSel.innerHTML = '<option value="">Scenario</option>';
+function renderProfiles() {
+  if (!state.profileList) return;
+  const profiles = Array.isArray(state.profiles) ? state.profiles : [];
+  if (!profiles.length) {
+    state.profileList.innerHTML = "<div class='dw-empty small'>No profiles</div>";
     return;
   }
-  devices.forEach((dev, idx) => {
-    const opt = document.createElement('option');
-    opt.value = idx;
-    opt.textContent = dev.display_name || dev.name || dev.id || (`Device ${idx + 1}`);
-    devSel.appendChild(opt);
-  });
-  populateScenarioSelect();
+  state.profileList.innerHTML = profiles.map((profile) => {
+    const active = profile.id === state.activeProfile ? ' active' : '';
+    const label = escapeHtml(profile.name || profile.id);
+    return `<div class="dw-profile-chip${active}" data-profile-id="${escapeAttr(profile.id)}">${label}</div>`;
+  }).join('');
 }
 
-let wizardStylesInjected = false;
+function renderActions() {
+  if (!state.actionsRoot) return;
+  const devices = state.model?.devices || [];
+  const groups = devices.map((dev) => {
+    const scenarios = (dev.scenarios || []).filter(sc => sc && sc.button_enabled && sc.id);
+    if (!scenarios.length || !dev.id) {
+      return '';
+    }
+    const title = escapeHtml(dev.display_name || dev.name || dev.id);
+    const buttons = scenarios.map((sc) => {
+      const label = escapeHtml(sc.button_label || sc.name || sc.id);
+      return `<button class="dw-action-btn" data-run-device="${escapeAttr(dev.id)}" data-run-scenario="${escapeAttr(sc.id)}">${label}</button>`;
+    }).join('');
+    return `<div class="dw-action-group">
+      <div class="dw-action-title">${title}</div>
+      <div class="dw-action-buttons">${buttons}</div>
+    </div>`;
+  }).filter(Boolean).join('');
+  state.actionsRoot.innerHTML = groups || "<div class='dw-empty'>No action buttons configured.</div>";
+}
+
+function createProfile(cloneId) {
+  const id = prompt('Profile id:', 'profile_' + Date.now().toString(16));
+  if (!id) {
+    return;
+  }
+  const name = prompt('Display name:', id) || id;
+  let url = '/api/devices/profile/create?id=' + encodeURIComponent(id) +
+    '&name=' + encodeURIComponent(name);
+  if (cloneId) {
+    url += '&clone=' + encodeURIComponent(cloneId);
+  }
+  fetch(url, {method: 'POST'})
+    .then(() => loadModel())
+    .catch(err => setStatus('Profile create failed: ' + err.message, '#f87171'));
+}
+
+function cloneProfile() {
+  if (!state.activeProfile) {
+    return;
+  }
+  createProfile(state.activeProfile);
+}
+
+function downloadProfile() {
+  const id = state.activeProfile || (state.profiles[0]?.id) || '';
+  const url = id ? `/api/devices/profile/download?profile=${encodeURIComponent(id)}` : '/api/devices/profile/download';
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  setTimeout(() => {
+    document.body.removeChild(anchor);
+  }, 0);
+}
+
+function renameProfile() {
+  if (!state.activeProfile) {
+    return;
+  }
+  const name = prompt('New profile name:', state.activeProfile);
+  if (!name) {
+    return;
+  }
+  fetch('/api/devices/profile/rename?id=' + encodeURIComponent(state.activeProfile) +
+    '&name=' + encodeURIComponent(name), {method: 'POST'})
+    .then(() => loadModel())
+    .catch(err => setStatus('Rename failed: ' + err.message, '#f87171'));
+}
+
+function deleteProfile() {
+  if (!state.activeProfile) {
+    return;
+  }
+  if (!confirm('Delete profile ' + state.activeProfile + '?')) {
+    return;
+  }
+  fetch('/api/devices/profile/delete?id=' + encodeURIComponent(state.activeProfile), {method: 'POST'})
+    .then(() => loadModel())
+    .catch(err => setStatus('Delete failed: ' + err.message, '#f87171'));
+}
+
+function activateProfile(id) {
+  if (!id || id === state.activeProfile) {
+    return;
+  }
+  state.activeProfile = id;
+  renderProfiles();
+  fetch('/api/devices/profile/activate?id=' + encodeURIComponent(id), {method: 'POST'})
+    .then(() => loadModel())
+    .catch(err => setStatus('Activate failed: ' + err.message, '#f87171'));
+}
+
 function injectWizardStyles() {
-  if (wizardStylesInjected) return;
-  wizardStylesInjected = true;
+  if (document.getElementById('dw_wizard_styles')) return;
   const style = document.createElement('style');
   style.id = 'dw_wizard_styles';
   style.textContent = `
@@ -359,62 +438,24 @@ function injectWizardStyles() {
   document.head.appendChild(style);
 }
 
-function populateScenarioSelect() {
-  const devSel = document.getElementById('device_run_select');
-  const scenSel = document.getElementById('scenario_run_select');
-  if (!devSel || !scenSel || !state.model) return;
-  const idx = parseInt(devSel.value, 10);
-  scenSel.innerHTML = '<option value="">Scenario</option>';
-  if (isNaN(idx) || !state.model.devices?.[idx]) return;
-  (state.model.devices[idx].scenarios || []).forEach((sc, sIdx) => {
-    const opt = document.createElement('option');
-    opt.value = sIdx;
-    opt.textContent = sc.name || sc.id || (`Scenario ${sIdx + 1}`);
-    scenSel.appendChild(opt);
-  });
-}
-
-function runScenario() {
-  const devSel = document.getElementById('device_run_select');
-  const scenSel = document.getElementById('scenario_run_select');
-  const status = document.getElementById('device_run_status');
-  if (!devSel || !scenSel || !status) return;
-  const devIdx = parseInt(devSel.value, 10);
-  const scenIdx = parseInt(scenSel.value, 10);
-  if (isNaN(devIdx) || isNaN(scenIdx) || !state.model?.devices?.[devIdx]) {
-    status.textContent = 'Select device and scenario';
-    status.style.color = '#f87171';
+function runScenario(deviceId, scenarioId) {
+  const devId = (toSafeString(deviceId).trim()) || (toSafeString(currentDevice()?.id).trim());
+  const scenId = (toSafeString(scenarioId).trim()) || (toSafeString(currentScenario()?.id).trim());
+  if (!devId || !scenId) {
+    setStatus('Select a scenario to run', '#f87171');
     return;
   }
-  const device = state.model.devices[devIdx];
-  if (!device) {
-    status.textContent = 'Device missing';
-    status.style.color = '#f87171';
-    return;
-  }
-  const scenario = device.scenarios?.[scenIdx];
-  if (!scenario) {
-    status.textContent = 'Scenario missing';
-    status.style.color = '#f87171';
-    return;
-  }
-  status.textContent = 'Triggering...';
-  status.style.color = '#fbbf24';
-  const safeDeviceId = (toSafeString(device.id).trim()) || (toSafeString(device.display_name).trim()) || `device_${devIdx}`;
-  const safeScenarioId = (toSafeString(scenario.id).trim()) || (toSafeString(scenario.name).trim()) || `scenario_${scenIdx}`;
-  const url = `/api/devices/run?device=${encodeURIComponent(safeDeviceId)}&scenario=${encodeURIComponent(safeScenarioId)}`;
+  const url = `/api/devices/run?device=${encodeURIComponent(devId)}&scenario=${encodeURIComponent(scenId)}`;
+  setStatus('Triggering scenario...', '#fbbf24');
   fetch(url)
     .then(r => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json().catch(() => ({}));
     })
     .then(() => {
-      status.textContent = 'Scenario queued';
-      status.style.color = '#22c55e';
+      setStatus('Scenario queued', '#22c55e');
     })
     .catch(err => {
-      status.textContent = 'Failed: ' + err.message;
-      status.style.color = '#f87171';
+      setStatus('Run failed: ' + err.message, '#f87171');
     });
 }
-

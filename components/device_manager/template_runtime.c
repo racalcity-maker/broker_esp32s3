@@ -495,7 +495,11 @@ static void publish_mqtt_payload(const char *topic, const char *payload)
     esp_err_t err = mqtt_core_publish(topic, body);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "mqtt publish failed (%s): %s", topic, esp_err_to_name(err));
+        return;
     }
+    // Forward local publications back through the template runtime so MQTT triggers
+    // and other template listeners react to internally generated events.
+    dm_template_runtime_handle_mqtt(topic, body);
 }
 
 static void trigger_uid_scenario(const char *device_id, const char *scenario_id)
@@ -739,6 +743,10 @@ static bool handle_mqtt_trigger_message(const char *topic, const char *payload)
         const dm_mqtt_trigger_rule_t *rule =
             dm_mqtt_trigger_runtime_match(&entry->runtime, topic, payload);
         if (!rule) {
+            ESP_LOGD(TAG, "[MQTT trigger] dev=%s no match topic=%s payload='%s'",
+                     entry->device_id,
+                     topic,
+                     payload ? payload : "");
             continue;
         }
         handled = true;

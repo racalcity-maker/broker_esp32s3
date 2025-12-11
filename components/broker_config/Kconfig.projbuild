@@ -1,5 +1,56 @@
 menu "Broker Configuration"
 
+config BROKER_I2S_BCK_PIN
+    int "I2S BCLK GPIO"
+    default 4
+    help
+        GPIO used for the I2S bit clock (BCK) line that feeds the DAC/amplifier.
+        Set to the pin wired to your audio codec.
+
+config BROKER_I2S_WS_PIN
+    int "I2S LRCK/WSEL GPIO"
+    default 5
+    help
+        GPIO for the I2S word select / LRCLK line.
+
+config BROKER_I2S_DATA_PIN
+    int "I2S DATA GPIO"
+    default 6
+    help
+        GPIO used for the I2S data output towards the DAC.
+
+config BROKER_SD_MISO_PIN
+    int "SD card MISO GPIO"
+    default 13
+    help
+        GPIO connected to the SD card MISO line (SPI mode).
+
+config BROKER_SD_MOSI_PIN
+    int "SD card MOSI GPIO"
+    default 11
+    help
+        GPIO connected to the SD card MOSI line (SPI mode).
+
+config BROKER_SD_CLK_PIN
+    int "SD card CLK GPIO"
+    default 12
+    help
+        GPIO connected to the SD card CLK line (SPI mode).
+
+config BROKER_SD_CS_PIN
+    int "SD card CS GPIO"
+    default 10
+    help
+        GPIO used for SD card chip select (SPI mode).
+
+config BROKER_MQTT_MAX_CLIENTS
+    int "Maximum simultaneous MQTT clients"
+    default 16
+    range 1 64
+    help
+        Number of concurrent MQTT sessions the embedded broker accepts.
+        Higher values increase PSRAM usage.
+
 config BROKER_WEB_AUTH_DEFAULT_USER
     string "Default Web UI username"
     default "admin"

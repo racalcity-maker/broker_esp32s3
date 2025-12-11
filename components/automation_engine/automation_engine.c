@@ -18,6 +18,7 @@
 #include "device_manager.h"
 #include "event_bus.h"
 #include "mqtt_core.h"
+#include "dm_template_runtime.h"
 
 #define AUTOMATION_QUEUE_LENGTH 16
 #define AUTOMATION_WORKER_STACK 4096
@@ -465,6 +466,7 @@ static void automation_execute_job(const automation_job_t *job)
                 automation_render_template(step->data.mqtt.payload, payload, sizeof(payload));
                 if (topic[0]) {
                     mqtt_core_publish(topic, payload);
+                    dm_template_runtime_handle_mqtt(topic, payload);
                 } else {
                     ESP_LOGW(TAG, "mqtt_publish skipped (empty topic)");
                 }

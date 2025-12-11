@@ -36,8 +36,6 @@ idf_component_register(
     EMBED_TXTFILES
         "assets/devices_wizard.css"
         ${GENERATED_WIZARD_JS}
-        "assets/devices_editor.css"
-        "assets/devices_editor.js"
     REQUIRES esp_http_server event_bus config_store network audio_player mqtt_core device_manager automation_engine
 )
 

@@ -580,7 +580,6 @@ void dm_load_defaults(device_manager_config_t *cfg)
     cfg->device_capacity = capacity;
     cfg->schema_version = DM_DEVICE_CONFIG_VERSION;
     cfg->generation = 1;
-    cfg->tab_limit = DEVICE_MANAGER_MAX_TABS;
     cfg->profile_count = 0;
     cfg->active_profile[0] = 0;
     dm_profiles_ensure_active(cfg);
@@ -595,8 +594,6 @@ bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *roo
     dm_load_defaults(cfg);
     cfg->schema_version = json_number_to_u32(cJSON_GetObjectItem(root, "schema"), DM_DEVICE_CONFIG_VERSION);
     cfg->generation = json_number_to_u32(cJSON_GetObjectItem(root, "generation"), cfg->generation);
-    uint32_t tab_limit = json_number_to_u32(cJSON_GetObjectItem(root, "tab_limit"), DEVICE_MANAGER_MAX_TABS);
-    cfg->tab_limit = (uint8_t)((tab_limit > DEVICE_MANAGER_MAX_TABS) ? DEVICE_MANAGER_MAX_TABS : tab_limit);
     cfg->profile_count = 0;
     cfg->active_profile[0] = 0;
     // Profiles array only stores metadata and device_count, actual devices parsed below.
@@ -641,7 +638,7 @@ bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *roo
     }
     dm_profiles_ensure_active(cfg);
 
-    // Parse devices with tabs/topics/scenarios/template payloads.
+    // Parse devices with topics/scenarios/template payloads.
     const cJSON *devices = cJSON_GetObjectItem(root, "devices");
     if (!devices || !cJSON_IsArray(devices)) {
         cfg->device_count = 0;
@@ -659,38 +656,19 @@ bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *roo
         device_descriptor_t *dev = &cfg->devices[dev_count];
         memset(dev, 0, sizeof(*dev));
         dm_str_copy(dev->id, sizeof(dev->id), cJSON_GetStringValue(cJSON_GetObjectItem(dev_node, "id")));
-        dm_str_copy(dev->display_name, sizeof(dev->display_name),
-                    cJSON_GetStringValue(cJSON_GetObjectItem(dev_node, "name")));
-        feed_wdt();
-        const cJSON *tabs = cJSON_GetObjectItem(dev_node, "tabs");
-        uint8_t tab_count = 0;
-        if (cJSON_IsArray(tabs)) {
-            const cJSON *tab_node = NULL;
-            cJSON_ArrayForEach(tab_node, tabs) {
-                if (tab_count >= DEVICE_MANAGER_MAX_TABS) {
-                    break;
-                }
-                if (!cJSON_IsObject(tab_node)) {
-                    continue;
-                }
-                const cJSON *type_item = cJSON_GetObjectItem(tab_node, "type");
-                if (!cJSON_IsString(type_item)) {
-                    continue;
-                }
-                device_tab_type_t tab_type;
-                if (!dm_tab_type_from_string(type_item->valuestring, &tab_type)) {
-                    continue;
-                }
-                device_tab_t *tab = &dev->tabs[tab_count++];
-                tab->type = tab_type;
-                dm_str_copy(tab->label, sizeof(tab->label),
-                            cJSON_GetStringValue(cJSON_GetObjectItem(tab_node, "label")));
-                dm_str_copy(tab->extra_payload, sizeof(tab->extra_payload),
-                            cJSON_GetStringValue(cJSON_GetObjectItem(tab_node, "extra")));
-                feed_wdt();
-            }
+        const cJSON *display_name = cJSON_GetObjectItem(dev_node, "display_name");
+        const cJSON *name = cJSON_GetObjectItem(dev_node, "name");
+        const char *display = NULL;
+        if (cJSON_IsString(display_name) && display_name->valuestring) {
+            display = display_name->valuestring;
+        } else {
+            display = cJSON_GetStringValue(name);
         }
-        dev->tab_count = tab_count;
+        if (!display || !display[0]) {
+            display = dev->id;
+        }
+        dm_str_copy(dev->display_name, sizeof(dev->display_name), display);
+        feed_wdt();
 
         const cJSON *topics = cJSON_GetObjectItem(dev_node, "topics");
         uint8_t topic_count = 0;
@@ -728,6 +706,10 @@ bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *roo
                 memset(sc, 0, sizeof(*sc));
                 dm_str_copy(sc->id, sizeof(sc->id), cJSON_GetStringValue(cJSON_GetObjectItem(sc_node, "id")));
                 dm_str_copy(sc->name, sizeof(sc->name), cJSON_GetStringValue(cJSON_GetObjectItem(sc_node, "name")));
+                const cJSON *button = cJSON_GetObjectItem(sc_node, "button_enabled");
+                sc->button_enabled = cJSON_IsTrue(button);
+                dm_str_copy(sc->button_label, sizeof(sc->button_label),
+                            cJSON_GetStringValue(cJSON_GetObjectItem(sc_node, "button_label")));
                 const cJSON *steps = cJSON_GetObjectItem(sc_node, "steps");
                 uint8_t step_count = 0;
                 if (cJSON_IsArray(steps)) {

@@ -145,7 +145,6 @@ static void build_uid_scenario(device_descriptor_t *dev,
 
 static esp_err_t apply_uid_template(device_descriptor_t *dev, const dm_uid_template_t *tpl)
 {
-    dev->tab_count = 0;
     dev->topic_count = 0;
     dev->scenario_count = 0;
 
@@ -176,7 +175,6 @@ static esp_err_t apply_uid_template(device_descriptor_t *dev, const dm_uid_templ
 
 static esp_err_t apply_signal_template(device_descriptor_t *dev, const dm_signal_hold_template_t *tpl)
 {
-    dev->tab_count = 0;
     dev->topic_count = 0;
     dev->scenario_count = 0;
 

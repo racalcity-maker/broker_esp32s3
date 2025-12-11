@@ -17,8 +17,6 @@ void dm_cjson_reset_hooks(void);
 
 const char *dm_condition_to_string(device_condition_type_t cond);
 bool dm_condition_from_string(const char *name, device_condition_type_t *out);
-const char *dm_tab_type_to_string(device_tab_type_t type);
-bool dm_tab_type_from_string(const char *name, device_tab_type_t *out);
 const char *dm_action_type_to_string(device_action_type_t type);
 bool dm_action_type_from_string(const char *name, device_action_type_t *out);
 

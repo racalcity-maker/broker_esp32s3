@@ -33,6 +33,7 @@
 #include "web_ui_page.h"
 #include "web_ui_utils.h"
 #include "web_ui_devices.h"
+#include "dm_profiles.h"
 
 #ifndef CONFIG_BROKER_WEB_AUTH_RESET_GPIO
 #define CONFIG_BROKER_WEB_AUTH_RESET_GPIO -1
@@ -907,6 +908,45 @@ static esp_err_t devices_profile_activate_handler(httpd_req_t *req)
     return web_ui_send_ok(req, "application/json", "{\"status\":\"ok\"}");
 }
 
+static esp_err_t devices_profile_download_handler(httpd_req_t *req)
+{
+    char query[128];
+    char id[DEVICE_MANAGER_ID_MAX_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "profile", id, sizeof(id));
+    }
+    if (!id[0]) {
+        const device_manager_config_t *cfg = device_manager_lock_config();
+        if (cfg) {
+            if (cfg->active_profile[0]) {
+                strncpy(id, cfg->active_profile, sizeof(id) - 1);
+                id[sizeof(id) - 1] = 0;
+            }
+            device_manager_unlock_config();
+        }
+    }
+    if (!id[0]) {
+        strncpy(id, DM_DEFAULT_PROFILE_ID, sizeof(id) - 1);
+        id[sizeof(id) - 1] = 0;
+    }
+    uint8_t *data = NULL;
+    size_t size = 0;
+    esp_err_t err = dm_profiles_export_raw(id, &data, &size);
+    if (err != ESP_OK || !data || size == 0) {
+        if (data) {
+            heap_caps_free(data);
+        }
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "profile unavailable");
+    }
+    char disposition[128];
+    snprintf(disposition, sizeof(disposition), "attachment; filename=\"profile_%s.bin\"", id);
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+    esp_err_t res = httpd_resp_send(req, (const char *)data, size);
+    heap_caps_free(data);
+    return res;
+}
+
 static esp_err_t devices_variables_handler(httpd_req_t *req)
 {
     return web_ui_send_ok(req, "application/json", "[]");
@@ -1336,6 +1376,7 @@ static esp_err_t start_httpd(void)
     static web_route_t route_profile_delete = {.fn = devices_profile_delete_handler, .redirect_on_fail = false};
     static web_route_t route_profile_rename = {.fn = devices_profile_rename_handler, .redirect_on_fail = false};
     static web_route_t route_profile_activate = {.fn = devices_profile_activate_handler, .redirect_on_fail = false};
+    static web_route_t route_profile_download = {.fn = devices_profile_download_handler, .redirect_on_fail = false};
     static web_route_t route_variables = {.fn = devices_variables_handler, .redirect_on_fail = false};
     static web_route_t route_templates = {.fn = devices_templates_handler, .redirect_on_fail = false};
     static web_route_t route_auth_password = {.fn = auth_password_handler, .redirect_on_fail = false};
@@ -1368,6 +1409,7 @@ static esp_err_t start_httpd(void)
     ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/delete", HTTP_POST, &route_profile_delete), TAG, "register profile delete");
     ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/rename", HTTP_POST, &route_profile_rename), TAG, "register profile rename");
     ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/activate", HTTP_POST, &route_profile_activate), TAG, "register profile activate");
+    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/download", HTTP_GET, &route_profile_download), TAG, "register profile download");
     ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/variables", HTTP_GET, &route_variables), TAG, "register variables");
     ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/templates", HTTP_GET, &route_templates), TAG, "register templates");
     return ESP_OK;

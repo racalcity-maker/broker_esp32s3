@@ -608,6 +608,13 @@ esp_err_t device_manager_profile_activate(const char *id)
     s_config->generation++;
     esp_err_t err = persist_locked();
     dm_unlock();
+    if (err == ESP_OK) {
+        register_templates_from_config(s_config);
+        event_bus_message_t msg = {
+            .type = EVENT_DEVICE_CONFIG_CHANGED,
+        };
+        event_bus_post(&msg, 0);
+    }
     return err;
 }
 

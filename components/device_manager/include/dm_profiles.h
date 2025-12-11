@@ -17,3 +17,4 @@ esp_err_t dm_profiles_load_profile(const char *profile_id,
                                    uint8_t capacity,
                                    uint8_t *device_count);
 esp_err_t dm_profiles_delete_profile_file(const char *profile_id);
+esp_err_t dm_profiles_export_raw(const char *profile_id, uint8_t **out_data, size_t *out_size);

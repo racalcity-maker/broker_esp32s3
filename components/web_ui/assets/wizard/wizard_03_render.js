@@ -41,7 +41,6 @@ function renderDeviceDetail() {
       </div>
     </div>
     ${renderTemplateSection(dev)}
-    ${renderTabsSection(dev)}
     ${renderTopicsSection(dev)}
     ${renderScenariosSection(dev)}
   `;
@@ -63,6 +62,8 @@ function renderTemplateSection(dev) {
     body = renderConditionTemplate(dev);
   } else if (tplType === 'interval_task') {
     body = renderIntervalTemplate(dev);
+  } else if (tplType === 'sequence_lock') {
+    body = renderSequenceTemplate(dev);
   }
   return `
     <div class="dw-section">
@@ -238,26 +239,49 @@ function renderIntervalTemplate(dev) {
     </div>`;
 }
 
-function renderTabsSection(dev) {
-  const rows = (dev.tabs || []).map((tab, idx) => {
-    const options = TAB_TYPES.map(t => `<option value="${t.value}" ${tab.type === t.value ? 'selected' : ''}>${t.label}</option>`).join('');
-    return `<tr>
-      <td><select data-tab-field="type" data-index="${idx}">${options}</select></td>
-      <td><input data-tab-field="label" data-index="${idx}" value="${escapeAttr(tab.label || '')}" placeholder="Label"></td>
-      <td><input data-tab-field="extra_payload" data-index="${idx}" value="${escapeAttr(tab.extra_payload || '')}" placeholder="Extra payload"></td>
-      <td><button class="danger small" data-action="remove-tab" data-index="${idx}">&times;</button></td>
-    </tr>`;
+function renderSequenceTemplate(dev) {
+  ensureSequenceTemplate(dev);
+  const tpl = dev.template?.sequence || {};
+  const steps = (tpl.steps || []).map((step, idx) => {
+    const checked = step.payload_required ? 'checked' : '';
+    return `
+      <div class="dw-slot">
+        <div class="dw-slot-head">Step ${idx + 1}<button class="danger small" data-action="sequence-step-remove" data-index="${idx}">&times;</button></div>
+        <div class="dw-field"><label>MQTT topic</label><input data-template-field="sequence-step" data-subfield="topic" data-index="${idx}" value="${escapeAttr(step.topic || '')}" placeholder="sensor/topic"></div>
+        <div class="dw-field"><label>Payload</label><input data-template-field="sequence-step" data-subfield="payload" data-index="${idx}" value="${escapeAttr(step.payload || '')}" placeholder="payload"></div>
+        <div class="dw-field dw-checkbox-field"><label><input type="checkbox" data-template-field="sequence-step" data-subfield="payload_required" data-index="${idx}" ${checked}>Require exact payload</label></div>
+        <div class="dw-field"><label>Hint topic</label><input data-template-field="sequence-step" data-subfield="hint_topic" data-index="${idx}" value="${escapeAttr(step.hint_topic || '')}" placeholder="hint/topic"></div>
+        <div class="dw-field"><label>Hint payload</label><input data-template-field="sequence-step" data-subfield="hint_payload" data-index="${idx}" value="${escapeAttr(step.hint_payload || '')}" placeholder="payload"></div>
+        <div class="dw-field"><label>Hint audio track</label><input data-template-field="sequence-step" data-subfield="hint_audio_track" data-index="${idx}" value="${escapeAttr(step.hint_audio_track || '')}" placeholder="/sdcard/hint.mp3"></div>
+      </div>`;
   }).join('');
   return `
     <div class="dw-section">
       <div class="dw-section-head">
-        <h4>Tabs</h4>
-        <div class="dw-table-actions"><button data-action="add-tab">Add tab</button></div>
+        <span>Sequence steps</span>
+        <button data-action="sequence-step-add">Add step</button>
       </div>
-      <table class="dw-mini-table">
-        <thead><tr><th>Type</th><th>Label</th><th>Extra</th><th></th></tr></thead>
-        <tbody>${rows || "<tr><td colspan='4' class='muted small'>No tabs</td></tr>"}</tbody>
-      </table>
+      ${steps || "<div class='dw-empty small'>No steps defined.</div>"}
+      <div class="dw-hint small">Steps advance when matching MQTT messages arrive in order.</div>
+    </div>
+    <div class="dw-section">
+      <div class="dw-field"><label>Timeout (ms)</label><input type="number" min="0" step="100" data-template-field="sequence" data-subfield="timeout_ms" value="${tpl.timeout_ms || 0}" placeholder="0 = no timeout"></div>
+      <div class="dw-field"><label class="dw-checkbox"><input type="checkbox" data-template-field="sequence" data-subfield="reset_on_error" ${tpl.reset_on_error !== false ? 'checked' : ''}>Reset on wrong step</label></div>
+    </div>
+    <div class="dw-section">
+      <h5>Success actions</h5>
+      <div class="dw-field"><label>MQTT topic</label><input data-template-field="sequence" data-subfield="success_topic" value="${escapeAttr(tpl.success_topic || '')}" placeholder="quest/sequence/success"></div>
+      <div class="dw-field"><label>Payload</label><input data-template-field="sequence" data-subfield="success_payload" value="${escapeAttr(tpl.success_payload || '')}" placeholder="payload"></div>
+      <div class="dw-field"><label>Audio track</label><input data-template-field="sequence" data-subfield="success_audio_track" value="${escapeAttr(tpl.success_audio_track || '')}" placeholder="/sdcard/success.mp3"></div>
+      <div class="dw-field"><label>Scenario ID</label><input data-template-field="sequence" data-subfield="success_scenario" value="${escapeAttr(tpl.success_scenario || '')}" placeholder="scenario_success"></div>
+    </div>
+    <div class="dw-section">
+      <h5>Fail actions</h5>
+      <div class="dw-field"><label>MQTT topic</label><input data-template-field="sequence" data-subfield="fail_topic" value="${escapeAttr(tpl.fail_topic || '')}" placeholder="quest/sequence/fail"></div>
+      <div class="dw-field"><label>Payload</label><input data-template-field="sequence" data-subfield="fail_payload" value="${escapeAttr(tpl.fail_payload || '')}" placeholder="payload"></div>
+      <div class="dw-field"><label>Audio track</label><input data-template-field="sequence" data-subfield="fail_audio_track" value="${escapeAttr(tpl.fail_audio_track || '')}" placeholder="/sdcard/fail.mp3"></div>
+      <div class="dw-field"><label>Scenario ID</label><input data-template-field="sequence" data-subfield="fail_scenario" value="${escapeAttr(tpl.fail_scenario || '')}" placeholder="scenario_fail"></div>
+      <div class="dw-hint small">Failure actions run when timeout expires or an unexpected topic arrives.</div>
     </div>`;
 }
 
@@ -321,6 +345,13 @@ function renderScenarioDetail() {
     <div class="dw-field">
       <label>Scenario name</label>
       <input data-scenario-field="name" value="${escapeAttr(scen.name || '')}" placeholder="Display name">
+    </div>
+    <div class="dw-field dw-checkbox-field">
+      <label><input type="checkbox" data-scenario-field="button_enabled" ${scen.button_enabled ? 'checked' : ''}>Show in Actions tab</label>
+    </div>
+    <div class="dw-field">
+      <label>Button label</label>
+      <input data-scenario-field="button_label" value="${escapeAttr(scen.button_label || scen.name || scen.id || '')}" placeholder="Friendly label" ${scen.button_enabled ? '' : 'disabled'}>
     </div>
     <div class="dw-step-footer">
       <button class="secondary" data-action="add-step">Add step</button>
@@ -410,4 +441,3 @@ function renderStepFields(step, idx) {
       return '';
   }
 }
-

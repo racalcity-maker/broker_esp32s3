@@ -3,16 +3,6 @@
 #include <strings.h>
 
 typedef struct {
-    device_tab_type_t type;
-    const char *name;
-} tab_type_map_t;
-
-static const tab_type_map_t k_tab_types[] = {
-    {DEVICE_TAB_AUDIO, "audio"},
-    {DEVICE_TAB_CUSTOM, "custom"},
-};
-
-typedef struct {
     device_action_type_t type;
     const char *name;
 } action_type_map_t;
@@ -53,30 +43,6 @@ bool dm_condition_from_string(const char *name, device_condition_type_t *out)
     if (strcasecmp(name, "any") == 0) {
         *out = DEVICE_CONDITION_ANY;
         return true;
-    }
-    return false;
-}
-
-const char *dm_tab_type_to_string(device_tab_type_t type)
-{
-    for (size_t i = 0; i < sizeof(k_tab_types) / sizeof(k_tab_types[0]); ++i) {
-        if (k_tab_types[i].type == type) {
-            return k_tab_types[i].name;
-        }
-    }
-    return "custom";
-}
-
-bool dm_tab_type_from_string(const char *name, device_tab_type_t *out)
-{
-    if (!name || !out) {
-        return false;
-    }
-    for (size_t i = 0; i < sizeof(k_tab_types) / sizeof(k_tab_types[0]); ++i) {
-        if (strcasecmp(k_tab_types[i].name, name) == 0) {
-            *out = k_tab_types[i].type;
-            return true;
-        }
     }
     return false;
 }

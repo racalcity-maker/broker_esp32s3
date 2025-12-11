@@ -452,7 +452,6 @@ esp_err_t dm_storage_internal_export(const device_manager_config_t *cfg, char **
     }
     cJSON_AddNumberToObject(root, "schema", cfg->schema_version);
     cJSON_AddNumberToObject(root, "generation", cfg->generation);
-    cJSON_AddNumberToObject(root, "tab_limit", cfg->tab_limit);
     const char *active_profile = cfg->active_profile[0] ? cfg->active_profile : DM_DEFAULT_PROFILE_ID;
     cJSON_AddStringToObject(root, "active_profile", active_profile);
     cJSON *profiles = cJSON_AddArrayToObject(root, "profiles");
@@ -494,27 +493,10 @@ esp_err_t dm_storage_internal_export(const device_manager_config_t *cfg, char **
             goto cleanup;
         }
         cJSON_AddItemToArray(devices, d);
+        const char *display_name = dev->display_name[0] ? dev->display_name : dev->id;
         cJSON_AddStringToObject(d, "id", dev->id);
-        cJSON_AddStringToObject(d, "name", dev->display_name);
-
-        cJSON *tabs = cJSON_AddArrayToObject(d, "tabs");
-        if (!tabs) {
-            err = ESP_ERR_NO_MEM;
-            goto cleanup;
-        }
-        for (uint8_t t = 0; t < dev->tab_count && t < DEVICE_MANAGER_MAX_TABS; ++t) {
-            const device_tab_t *tab = &dev->tabs[t];
-            cJSON *tab_obj = cJSON_CreateObject();
-            if (!tab_obj) {
-                err = ESP_ERR_NO_MEM;
-                goto cleanup;
-            }
-            cJSON_AddItemToArray(tabs, tab_obj);
-            cJSON_AddStringToObject(tab_obj, "type", dm_tab_type_to_string(tab->type));
-            cJSON_AddStringToObject(tab_obj, "label", tab->label);
-            cJSON_AddStringToObject(tab_obj, "extra", tab->extra_payload);
-            feed_wdt();
-        }
+        cJSON_AddStringToObject(d, "name", display_name);
+        cJSON_AddStringToObject(d, "display_name", display_name);
 
         cJSON *topics = cJSON_AddArrayToObject(d, "topics");
         if (!topics) {
@@ -549,6 +531,8 @@ esp_err_t dm_storage_internal_export(const device_manager_config_t *cfg, char **
             cJSON_AddItemToArray(scenarios, sc_obj);
             cJSON_AddStringToObject(sc_obj, "id", sc->id);
             cJSON_AddStringToObject(sc_obj, "name", sc->name);
+            cJSON_AddBoolToObject(sc_obj, "button_enabled", sc->button_enabled);
+            cJSON_AddStringToObject(sc_obj, "button_label", sc->button_label);
             cJSON *steps = cJSON_AddArrayToObject(sc_obj, "steps");
             if (!steps) {
                 err = ESP_ERR_NO_MEM;
@@ -603,4 +587,3 @@ cleanup:
     dm_cjson_reset_hooks();
     return err;
 }
-

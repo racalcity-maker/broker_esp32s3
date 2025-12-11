@@ -273,7 +273,6 @@ function buildDeviceFromWizard() {
   const base = {
     id: id || slugify(name),
     display_name: name || 'Device',
-    tabs: [],
     topics: [],
     scenarios: [],
   };
@@ -282,4 +281,3 @@ function buildDeviceFromWizard() {
   }
   return base;
 }
-
