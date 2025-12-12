@@ -27,6 +27,10 @@ typedef struct uid_runtime_entry {
     dm_uid_runtime_t runtime;
     char topics[DM_UID_TEMPLATE_MAX_SLOTS][DEVICE_MANAGER_TOPIC_MAX_LEN];
     size_t topic_count;
+    char start_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char start_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+    char broadcast_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char broadcast_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
     struct uid_runtime_entry *next;
 } uid_runtime_entry_t;
 
@@ -265,6 +269,10 @@ static esp_err_t register_uid_runtime(const dm_uid_template_t *tpl, const char *
     for (uint8_t i = 0; i < tpl->slot_count && i < DM_UID_TEMPLATE_MAX_SLOTS; ++i) {
         dm_str_copy(entry->topics[i], sizeof(entry->topics[i]), tpl->slots[i].source_id);
     }
+    dm_str_copy(entry->start_topic, sizeof(entry->start_topic), tpl->start_topic);
+    dm_str_copy(entry->start_payload, sizeof(entry->start_payload), tpl->start_payload);
+    dm_str_copy(entry->broadcast_topic, sizeof(entry->broadcast_topic), tpl->broadcast_topic);
+    dm_str_copy(entry->broadcast_payload, sizeof(entry->broadcast_payload), tpl->broadcast_payload);
     entry->next = s_uid_entries;
     s_uid_entries = entry;
     ESP_LOGI(TAG, "registered UID runtime for device %s with %zu slots", entry->device_id, entry->topic_count);
@@ -502,6 +510,48 @@ static void publish_mqtt_payload(const char *topic, const char *payload)
     dm_template_runtime_handle_mqtt(topic, body);
 }
 
+static bool payload_matches(const char *expected, const char *actual)
+{
+    if (!expected || !expected[0]) {
+        return true;
+    }
+    if (!actual) {
+        actual = "";
+    }
+    return strcmp(expected, actual) == 0;
+}
+
+static void reset_uid_entry(uid_runtime_entry_t *entry)
+{
+    if (!entry) {
+        return;
+    }
+    dm_uid_runtime_reset(&entry->runtime);
+}
+
+static bool handle_uid_start_event(uid_runtime_entry_t *entry, const char *topic, const char *payload)
+{
+    if (!entry || !entry->start_topic[0] || !topic) {
+        return false;
+    }
+    if (strcmp(entry->start_topic, topic) != 0) {
+        return false;
+    }
+    if (!payload_matches(entry->start_payload, payload)) {
+        return false;
+    }
+    ESP_LOGI(TAG,
+             "[UID] dev=%s start topic=%s payload='%s'",
+             entry->device_id,
+             topic,
+             payload ? payload : "");
+    reset_uid_entry(entry);
+    if (entry->broadcast_topic[0]) {
+        publish_mqtt_payload(entry->broadcast_topic, entry->broadcast_payload);
+    }
+    return true;
+}
+
 static void trigger_uid_scenario(const char *device_id, const char *scenario_id)
 {
     esp_err_t err = automation_engine_trigger(device_id, scenario_id);
@@ -542,16 +592,21 @@ static void apply_uid_action(const dm_uid_action_t *action)
 static bool handle_uid_message(const char *topic, const char *payload)
 {
     bool handled = false;
+    const char *body = payload ? payload : "";
     for (uid_runtime_entry_t *entry = s_uid_entries; entry; entry = entry->next) {
+        if (handle_uid_start_event(entry, topic, body)) {
+            handled = true;
+            continue;
+        }
         for (size_t t = 0; t < entry->topic_count; ++t) {
             if (entry->topics[t][0] && strcmp(entry->topics[t], topic) == 0) {
                 handled = true;
-                dm_uid_action_t action = dm_uid_runtime_handle_value(&entry->runtime, topic, payload ? payload : "");
+                dm_uid_action_t action = dm_uid_runtime_handle_value(&entry->runtime, topic, body);
                 ESP_LOGI(TAG, "[UID] dev=%s topic=%s event=%s payload='%s'",
                          entry->device_id,
                          topic,
                          uid_event_str(action.event),
-                         payload ? payload : "");
+                         body);
                 apply_uid_action(&action);
                 switch (action.event) {
                 case DM_UID_EVENT_SUCCESS:

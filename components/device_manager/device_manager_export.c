@@ -149,6 +149,10 @@ static cJSON *uid_template_to_json(const device_descriptor_t *dev)
             cJSON_AddStringToObject(slot_obj, "last_value", snapshot.slots[i].last_value);
         }
     }
+    template_to_json_string(root, "start_topic", tpl->start_topic);
+    template_to_json_string(root, "start_payload", tpl->start_payload);
+    template_to_json_string(root, "broadcast_topic", tpl->broadcast_topic);
+    template_to_json_string(root, "broadcast_payload", tpl->broadcast_payload);
     template_to_json_string(root, "success_topic", tpl->success_topic);
     template_to_json_string(root, "success_payload", tpl->success_payload);
     template_to_json_string(root, "fail_topic", tpl->fail_topic);

@@ -46,8 +46,7 @@ void dm_uid_runtime_init(dm_uid_runtime_t *rt, const dm_uid_template_t *tpl)
     } else {
         memset(&rt->config, 0, sizeof(rt->config));
     }
-    dm_uid_state_reset(&rt->state);
-    memset(rt->slots, 0, sizeof(rt->slots));
+    dm_uid_runtime_reset(rt);
 }
 
 void dm_uid_runtime_set_template(dm_uid_runtime_t *rt, const dm_uid_template_t *tpl)
@@ -56,6 +55,14 @@ void dm_uid_runtime_set_template(dm_uid_runtime_t *rt, const dm_uid_template_t *
         return;
     }
     memcpy(&rt->config, tpl, sizeof(*tpl));
+    dm_uid_runtime_reset(rt);
+}
+
+void dm_uid_runtime_reset(dm_uid_runtime_t *rt)
+{
+    if (!rt) {
+        return;
+    }
     dm_uid_state_reset(&rt->state);
     memset(rt->slots, 0, sizeof(rt->slots));
 }

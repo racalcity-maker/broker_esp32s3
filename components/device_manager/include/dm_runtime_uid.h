@@ -29,6 +29,7 @@ typedef struct {
 
 void dm_uid_runtime_init(dm_uid_runtime_t *rt, const dm_uid_template_t *tpl);
 void dm_uid_runtime_set_template(dm_uid_runtime_t *rt, const dm_uid_template_t *tpl);
+void dm_uid_runtime_reset(dm_uid_runtime_t *rt);
 dm_uid_action_t dm_uid_runtime_handle_value(dm_uid_runtime_t *rt,
                                             const char *source_id,
                                             const char *value);

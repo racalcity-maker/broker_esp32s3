@@ -89,6 +89,22 @@ static bool uid_template_from_json(dm_uid_template_t *tpl, const cJSON *obj)
         slot_index++;
     }
     tpl->slot_count = slot_index;
+    const cJSON *start_topic = cJSON_GetObjectItem(obj, "start_topic");
+    if (cJSON_IsString(start_topic) && start_topic->valuestring) {
+        dm_str_copy(tpl->start_topic, sizeof(tpl->start_topic), start_topic->valuestring);
+    }
+    const cJSON *start_payload = cJSON_GetObjectItem(obj, "start_payload");
+    if (cJSON_IsString(start_payload) && start_payload->valuestring) {
+        dm_str_copy(tpl->start_payload, sizeof(tpl->start_payload), start_payload->valuestring);
+    }
+    const cJSON *broadcast_topic = cJSON_GetObjectItem(obj, "broadcast_topic");
+    if (cJSON_IsString(broadcast_topic) && broadcast_topic->valuestring) {
+        dm_str_copy(tpl->broadcast_topic, sizeof(tpl->broadcast_topic), broadcast_topic->valuestring);
+    }
+    const cJSON *broadcast_payload = cJSON_GetObjectItem(obj, "broadcast_payload");
+    if (cJSON_IsString(broadcast_payload) && broadcast_payload->valuestring) {
+        dm_str_copy(tpl->broadcast_payload, sizeof(tpl->broadcast_payload), broadcast_payload->valuestring);
+    }
     const cJSON *success_topic = cJSON_GetObjectItem(obj, "success_topic");
     if (cJSON_IsString(success_topic) && success_topic->valuestring) {
         dm_str_copy(tpl->success_topic, sizeof(tpl->success_topic), success_topic->valuestring);

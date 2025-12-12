@@ -1,3 +1,5 @@
+// NOTE: This bundle is generated from assets/wizard/*.js via build_devices_wizard.py.
+//       Edit the source modules rather than the assembled devices_wizard.js.
 (() => {
 const ACTION_TYPES = ['mqtt_publish','audio_play','audio_stop','set_flag','wait_flags','loop','delay','event','nop'];
 const TEMPLATE_TYPES = [
@@ -276,4 +278,5 @@ function handleDetailInput(ev) {
   if (el.dataset.waitField) {
     updateWaitField(el.dataset.stepIndex, el.dataset.reqIndex, el.dataset.waitField, el);
   }
+  validateRequiredFields();
 }

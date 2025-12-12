@@ -60,6 +60,18 @@ esp_err_t dm_template_factory_build_uid(const dm_uid_template_params_t *params, 
         }
     }
 
+    copy_topic_payload(out->data.uid.start_topic,
+                       sizeof(out->data.uid.start_topic),
+                       out->data.uid.start_payload,
+                       sizeof(out->data.uid.start_payload),
+                       params->start_topic,
+                       params->start_payload);
+    copy_topic_payload(out->data.uid.broadcast_topic,
+                       sizeof(out->data.uid.broadcast_topic),
+                       out->data.uid.broadcast_payload,
+                       sizeof(out->data.uid.broadcast_payload),
+                       params->broadcast_topic,
+                       params->broadcast_payload);
     copy_topic_payload(out->data.uid.success_topic,
                        sizeof(out->data.uid.success_topic),
                        out->data.uid.success_payload,

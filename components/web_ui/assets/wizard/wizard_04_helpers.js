@@ -43,6 +43,14 @@ function createAudioStep(track) {
   };
 }
 
+function createDelayStep(ms) {
+  const parsed = typeof ms === 'number' ? ms : parseInt(ms, 10);
+  return {
+    type: 'delay',
+    delay_ms: Number.isFinite(parsed) ? parsed : 0,
+  };
+}
+
 function updateDeviceField(field, value) {
   const dev = currentDevice();
   if (!dev) return;
@@ -91,6 +99,13 @@ function updateTemplateField(el) {
       break;
     }
     case 'uid-action': {
+      ensureUidTemplate(dev);
+      if (!dev.template?.uid) return;
+      const sub = el.dataset.subfield;
+      dev.template.uid[sub] = el.value;
+      break;
+    }
+    case 'uid-activation': {
       ensureUidTemplate(dev);
       if (!dev.template?.uid) return;
       const sub = el.dataset.subfield;
@@ -359,6 +374,10 @@ function setDeviceTemplate(dev, type) {
 function defaultUidTemplate() {
   return {
     slots: [],
+    start_topic: '',
+    start_payload: '',
+    broadcast_topic: '',
+    broadcast_payload: '',
     success_topic: '',
     success_payload: '',
     success_audio_track: '',
@@ -450,6 +469,10 @@ function ensureUidTemplate(dev) {
       tpl[key] = '';
     }
   });
+  tpl.start_topic = tpl.start_topic || '';
+  tpl.start_payload = tpl.start_payload || '';
+  tpl.broadcast_topic = tpl.broadcast_topic || '';
+  tpl.broadcast_payload = tpl.broadcast_payload || '';
 }
 
 function ensureSignalTemplate(dev) {
@@ -467,6 +490,56 @@ function ensureSignalTemplate(dev) {
   sig.heartbeat_timeout_ms = sig.heartbeat_timeout_ms || 0;
   sig.hold_track_loop = !!sig.hold_track_loop;
   sig.signal_on_ms = sig.signal_on_ms || 0;
+  ensureSignalScenario(dev, sig);
+}
+
+function ensureSignalScenario(dev, sig) {
+  if (!dev) {
+    return;
+  }
+  if (!Array.isArray(dev.scenarios)) {
+    dev.scenarios = [];
+  }
+  const matchId = (sc) => sc && typeof sc.id === 'string' && sc.id.toLowerCase() === 'signal_complete';
+  let scenario = dev.scenarios.find(matchId);
+  if (!scenario) {
+    scenario = {
+      id: 'signal_complete',
+      name: 'Signal hold complete',
+      button_enabled: false,
+      button_label: '',
+      steps: [],
+    };
+    dev.scenarios.push(scenario);
+  } else {
+    scenario.id = scenario.id || 'signal_complete';
+    if (!scenario.name) {
+      scenario.name = 'Signal hold complete';
+    }
+    if (typeof scenario.button_label !== 'string') {
+      scenario.button_label = '';
+    }
+  }
+  scenario.button_enabled = !!scenario.button_enabled;
+  if (!Array.isArray(scenario.steps)) {
+    scenario.steps = [];
+  }
+  if (scenario.steps.length === 0 && sig) {
+    const defaults = [];
+    if (sig.signal_topic) {
+      defaults.push(createMqttStep(sig.signal_topic, sig.signal_payload_on || ''));
+    }
+    if (sig.complete_track) {
+      defaults.push(createAudioStep(sig.complete_track));
+    }
+    if (sig.signal_on_ms > 0) {
+      defaults.push(createDelayStep(sig.signal_on_ms));
+    }
+    if (sig.signal_topic) {
+      defaults.push(createMqttStep(sig.signal_topic, sig.signal_payload_off || ''));
+    }
+    scenario.steps = defaults;
+  }
 }
 
 function ensureMqttTemplate(dev) {
@@ -800,6 +873,9 @@ function normalizeDevice(dev) {
     dev.scenarios = [];
   }
   dev.scenarios.forEach(normalizeScenario);
+  if (dev.template && dev.template.type === 'signal_hold') {
+    ensureSignalTemplate(dev);
+  }
 }
 
 function normalizeScenario(scen) {

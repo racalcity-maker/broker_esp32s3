@@ -27,6 +27,12 @@ typedef struct {
     dm_uid_slot_t slots[DM_UID_TEMPLATE_MAX_SLOTS];
     uint8_t slot_count;
 
+    char start_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char start_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+
+    char broadcast_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char broadcast_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+
     char success_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
     char success_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
     char fail_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];

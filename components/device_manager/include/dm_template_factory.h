@@ -18,6 +18,12 @@ typedef struct {
     const dm_uid_slot_param_t *slots;
     size_t slot_count;
 
+    const char *start_topic;
+    const char *start_payload;
+
+    const char *broadcast_topic;
+    const char *broadcast_payload;
+
     const char *success_topic;
     const char *success_payload;
     const char *fail_topic;

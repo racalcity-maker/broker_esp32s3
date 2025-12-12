@@ -31,9 +31,10 @@ function renderDeviceDetail() {
   state.detail.innerHTML = `
     <div class="dw-section">
       <h4>Basics</h4>
-      <div class="dw-field">
+      <div class="dw-field required">
         <label>Device ID</label>
-        <input data-device-field="id" value="${escapeAttr(dev.id || '')}" placeholder="unique-id">
+        <input data-device-field="id" value="${escapeAttr(dev.id || '')}" placeholder="unique-id" data-required="true">
+        <div class="dw-hint small">Уникальный ID, используется для запуска сценариев.</div>
       </div>
       <div class="dw-field">
         <label>Display name</label>
@@ -44,6 +45,27 @@ function renderDeviceDetail() {
     ${renderTopicsSection(dev)}
     ${renderScenariosSection(dev)}
   `;
+  validateRequiredFields();
+}
+
+function validateRequiredFields() {
+  if (!state.detail) return;
+  const requiredControls = state.detail.querySelectorAll('[data-required="true"]');
+  requiredControls.forEach((control) => {
+    const field = control.closest('.dw-field');
+    if (!field) {
+      return;
+    }
+    const rule = control.dataset.requiredRule || '';
+    let valid = true;
+    if (rule === 'positive') {
+      const num = parseInt(control.value, 10);
+      valid = !Number.isNaN(num) && num > 0;
+    } else {
+      valid = (control.value || '').trim().length > 0;
+    }
+    field.classList.toggle('invalid', !valid);
+  });
 }
 
 function renderTemplateSection(dev) {
@@ -94,6 +116,27 @@ function renderUidTemplate(dev) {
   }).join('');
   return `
     <div class="dw-section">
+      <h5>Activation</h5>
+      <div class="dw-field required">
+        <label>Wait for topic</label>
+        <input data-template-field="uid-activation" data-subfield="start_topic" value="${escapeAttr(tpl.start_topic || '')}" placeholder="pictures/cmd/scan1" data-required="true">
+        <div class="dw-hint small">Когда приходит этот топик (опц. вместе с payload), начинаем проверку UID.</div>
+      </div>
+      <div class="dw-field">
+        <label>Match payload</label>
+        <input data-template-field="uid-activation" data-subfield="start_payload" value="${escapeAttr(tpl.start_payload || '')}" placeholder="leave empty for any payload">
+      </div>
+      <div class="dw-field">
+        <label>Broadcast topic</label>
+        <input data-template-field="uid-activation" data-subfield="broadcast_topic" value="${escapeAttr(tpl.broadcast_topic || '')}" placeholder="pictures/cmd/scan">
+        <div class="dw-hint small">Этот топик отправим сразу после получения стартовой команды.</div>
+      </div>
+      <div class="dw-field">
+        <label>Broadcast payload</label>
+        <input data-template-field="uid-activation" data-subfield="broadcast_payload" value="${escapeAttr(tpl.broadcast_payload || '')}">
+      </div>
+    </div>
+    <div class="dw-section">
       <div class="dw-section-head">
         <span>UID slots</span>
         <button data-action="slot-add">Add slot</button>
@@ -120,11 +163,11 @@ function renderSignalTemplate(dev) {
   return `
     <div class="dw-section">
       <h5>Signal control</h5>
-      <div class="dw-field"><label>Signal topic</label><input data-template-field="signal" data-subfield="signal_topic" value="${escapeAttr(sig.signal_topic || '')}" placeholder="quest/relay/cmd"></div>
+      <div class="dw-field required"><label>Signal topic</label><input data-template-field="signal" data-subfield="signal_topic" value="${escapeAttr(sig.signal_topic || '')}" placeholder="quest/relay/cmd" data-required="true"><div class="dw-hint small">Топик для отправки ON/OFF при завершении удержания.</div></div>
       <div class="dw-field"><label>Payload ON</label><input data-template-field="signal" data-subfield="signal_payload_on" value="${escapeAttr(sig.signal_payload_on || '')}" placeholder="ON"></div>
       <div class="dw-field"><label>Payload OFF</label><input data-template-field="signal" data-subfield="signal_payload_off" value="${escapeAttr(sig.signal_payload_off || '')}" placeholder="OFF"></div>
-      <div class="dw-field"><label>Heartbeat topic</label><input data-template-field="signal" data-subfield="heartbeat_topic" value="${escapeAttr(sig.heartbeat_topic || '')}" placeholder="quest/relay/hb"></div>
-      <div class="dw-field"><label>Required hold ms</label><input type="number" data-template-field="signal" data-subfield="required_hold_ms" value="${sig.required_hold_ms || 0}"></div>
+      <div class="dw-field required"><label>Heartbeat topic</label><input data-template-field="signal" data-subfield="heartbeat_topic" value="${escapeAttr(sig.heartbeat_topic || '')}" placeholder="quest/relay/hb" data-required="true"><div class="dw-hint small">Топик, куда устройство шлёт heartbeat пока луч активен.</div></div>
+      <div class="dw-field required"><label>Required hold ms</label><input type="number" data-template-field="signal" data-subfield="required_hold_ms" value="${sig.required_hold_ms || 0}" data-required="true" data-required-rule="positive"><div class="dw-hint small">Минимальная длительность удержания в миллисекундах.</div></div>
       <div class="dw-field"><label>Heartbeat timeout ms</label><input type="number" data-template-field="signal" data-subfield="heartbeat_timeout_ms" value="${sig.heartbeat_timeout_ms || 0}"></div>
       <div class="dw-field"><label>Hold track</label><input data-template-field="signal" data-subfield="hold_track" value="${escapeAttr(sig.hold_track || '')}" placeholder="/sdcard/hold.mp3"></div>
       <div class="dw-field"><label>Loop hold track</label><select data-template-field="signal" data-subfield="hold_track_loop"><option value="false" ${sig.hold_track_loop ? '' : 'selected'}>No</option><option value="true" ${sig.hold_track_loop ? 'selected' : ''}>Yes</option></select></div>

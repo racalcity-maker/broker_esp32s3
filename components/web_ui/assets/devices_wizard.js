@@ -1,3 +1,5 @@
+// NOTE: This bundle is generated from assets/wizard/*.js via build_devices_wizard.py.
+//       Edit the source modules rather than the assembled devices_wizard.js.
 (() => {
 const ACTION_TYPES = ['mqtt_publish','audio_play','audio_stop','set_flag','wait_flags','loop','delay','event','nop'];
 const TEMPLATE_TYPES = [
@@ -57,7 +59,6 @@ const state = {
   },
   wizardModal: null,
   wizardContent: null,
-  liveProfile: '',
 };
 
 function init() {
@@ -277,33 +278,12 @@ function handleDetailInput(ev) {
   if (el.dataset.waitField) {
     updateWaitField(el.dataset.stepIndex, el.dataset.reqIndex, el.dataset.waitField, el);
   }
+  validateRequiredFields();
 }
-function resolveLiveProfile(cfg) {
-  if (!cfg) {
-    return '';
-  }
-  if (cfg.active_profile) {
-    return cfg.active_profile;
-  }
-  if (cfg.activeProfile) {
-    return cfg.activeProfile;
-  }
-  if (Array.isArray(cfg.profiles)) {
-    const found = cfg.profiles.find((p) => p && p.active);
-    if (found?.id) {
-      return found.id;
-    }
-  }
-  return '';
-}
-
-function loadModel(profileId) {
+function loadModel() {
   setStatus('Loading...', '#fbbf24');
   state.busy = true;
-  const explicitProfile = (typeof profileId === 'string' && profileId.length > 0) ? profileId : null;
-  const targetProfile = explicitProfile || state.activeProfile || '';
-  const query = targetProfile ? `?profile=${encodeURIComponent(targetProfile)}` : '';
-  return fetch(`/api/devices/config${query}`)
+  fetch('/api/devices/config')
     .then(r => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
@@ -311,12 +291,8 @@ function loadModel(profileId) {
     .then(cfg => {
       state.model = normalizeLoadedConfig(cfg || {});
       state.profiles = Array.isArray(cfg?.profiles) ? cfg.profiles : [];
-      state.liveProfile = resolveLiveProfile(cfg);
-      if (targetProfile) {
-        state.activeProfile = targetProfile;
-      } else if (state.liveProfile) {
-        state.activeProfile = state.liveProfile;
-      } else if (!state.activeProfile && state.profiles.length) {
+      state.activeProfile = cfg?.active_profile || cfg?.activeProfile || '';
+      if (!state.activeProfile && state.profiles.length) {
         state.activeProfile = state.profiles[0].id;
       }
       state.selectedDevice = (state.model.devices && state.model.devices.length) ? 0 : -1;
@@ -324,7 +300,7 @@ function loadModel(profileId) {
       state.dirty = false;
       state.busy = false;
       renderAll();
-      setStatus(`Loaded profile ${state.activeProfile}`, '#22c55e');
+      setStatus('Loaded', '#22c55e');
     })
     .catch(err => {
       console.error(err);
@@ -338,8 +314,7 @@ function saveModel() {
   setStatus('Saving...', '#fbbf24');
   state.busy = true;
   const payload = prepareConfigForSave(state.model);
-  const targetProfile = state.activeProfile || '';
-  const profileQuery = targetProfile ? `?profile=${encodeURIComponent(targetProfile)}` : '';
+  const profileQuery = state.activeProfile ? `?profile=${encodeURIComponent(state.activeProfile)}` : '';
   fetch(`/api/devices/apply${profileQuery}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -437,9 +412,10 @@ function renderDeviceDetail() {
   state.detail.innerHTML = `
     <div class="dw-section">
       <h4>Basics</h4>
-      <div class="dw-field">
+      <div class="dw-field required">
         <label>Device ID</label>
-        <input data-device-field="id" value="${escapeAttr(dev.id || '')}" placeholder="unique-id">
+        <input data-device-field="id" value="${escapeAttr(dev.id || '')}" placeholder="unique-id" data-required="true">
+        <div class="dw-hint small">Уникальный ID, используется для запуска сценариев.</div>
       </div>
       <div class="dw-field">
         <label>Display name</label>
@@ -450,6 +426,27 @@ function renderDeviceDetail() {
     ${renderTopicsSection(dev)}
     ${renderScenariosSection(dev)}
   `;
+  validateRequiredFields();
+}
+
+function validateRequiredFields() {
+  if (!state.detail) return;
+  const requiredControls = state.detail.querySelectorAll('[data-required="true"]');
+  requiredControls.forEach((control) => {
+    const field = control.closest('.dw-field');
+    if (!field) {
+      return;
+    }
+    const rule = control.dataset.requiredRule || '';
+    let valid = true;
+    if (rule === 'positive') {
+      const num = parseInt(control.value, 10);
+      valid = !Number.isNaN(num) && num > 0;
+    } else {
+      valid = (control.value || '').trim().length > 0;
+    }
+    field.classList.toggle('invalid', !valid);
+  });
 }
 
 function renderTemplateSection(dev) {
@@ -500,6 +497,27 @@ function renderUidTemplate(dev) {
   }).join('');
   return `
     <div class="dw-section">
+      <h5>Activation</h5>
+      <div class="dw-field required">
+        <label>Wait for topic</label>
+        <input data-template-field="uid-activation" data-subfield="start_topic" value="${escapeAttr(tpl.start_topic || '')}" placeholder="pictures/cmd/scan1" data-required="true">
+        <div class="dw-hint small">Когда приходит этот топик (опц. вместе с payload), начинаем проверку UID.</div>
+      </div>
+      <div class="dw-field">
+        <label>Match payload</label>
+        <input data-template-field="uid-activation" data-subfield="start_payload" value="${escapeAttr(tpl.start_payload || '')}" placeholder="leave empty for any payload">
+      </div>
+      <div class="dw-field">
+        <label>Broadcast topic</label>
+        <input data-template-field="uid-activation" data-subfield="broadcast_topic" value="${escapeAttr(tpl.broadcast_topic || '')}" placeholder="pictures/cmd/scan">
+        <div class="dw-hint small">Этот топик отправим сразу после получения стартовой команды.</div>
+      </div>
+      <div class="dw-field">
+        <label>Broadcast payload</label>
+        <input data-template-field="uid-activation" data-subfield="broadcast_payload" value="${escapeAttr(tpl.broadcast_payload || '')}">
+      </div>
+    </div>
+    <div class="dw-section">
       <div class="dw-section-head">
         <span>UID slots</span>
         <button data-action="slot-add">Add slot</button>
@@ -526,11 +544,11 @@ function renderSignalTemplate(dev) {
   return `
     <div class="dw-section">
       <h5>Signal control</h5>
-      <div class="dw-field"><label>Signal topic</label><input data-template-field="signal" data-subfield="signal_topic" value="${escapeAttr(sig.signal_topic || '')}" placeholder="quest/relay/cmd"></div>
+      <div class="dw-field required"><label>Signal topic</label><input data-template-field="signal" data-subfield="signal_topic" value="${escapeAttr(sig.signal_topic || '')}" placeholder="quest/relay/cmd" data-required="true"><div class="dw-hint small">Топик для отправки ON/OFF при завершении удержания.</div></div>
       <div class="dw-field"><label>Payload ON</label><input data-template-field="signal" data-subfield="signal_payload_on" value="${escapeAttr(sig.signal_payload_on || '')}" placeholder="ON"></div>
       <div class="dw-field"><label>Payload OFF</label><input data-template-field="signal" data-subfield="signal_payload_off" value="${escapeAttr(sig.signal_payload_off || '')}" placeholder="OFF"></div>
-      <div class="dw-field"><label>Heartbeat topic</label><input data-template-field="signal" data-subfield="heartbeat_topic" value="${escapeAttr(sig.heartbeat_topic || '')}" placeholder="quest/relay/hb"></div>
-      <div class="dw-field"><label>Required hold ms</label><input type="number" data-template-field="signal" data-subfield="required_hold_ms" value="${sig.required_hold_ms || 0}"></div>
+      <div class="dw-field required"><label>Heartbeat topic</label><input data-template-field="signal" data-subfield="heartbeat_topic" value="${escapeAttr(sig.heartbeat_topic || '')}" placeholder="quest/relay/hb" data-required="true"><div class="dw-hint small">Топик, куда устройство шлёт heartbeat пока луч активен.</div></div>
+      <div class="dw-field required"><label>Required hold ms</label><input type="number" data-template-field="signal" data-subfield="required_hold_ms" value="${sig.required_hold_ms || 0}" data-required="true" data-required-rule="positive"><div class="dw-hint small">Минимальная длительность удержания в миллисекундах.</div></div>
       <div class="dw-field"><label>Heartbeat timeout ms</label><input type="number" data-template-field="signal" data-subfield="heartbeat_timeout_ms" value="${sig.heartbeat_timeout_ms || 0}"></div>
       <div class="dw-field"><label>Hold track</label><input data-template-field="signal" data-subfield="hold_track" value="${escapeAttr(sig.hold_track || '')}" placeholder="/sdcard/hold.mp3"></div>
       <div class="dw-field"><label>Loop hold track</label><select data-template-field="signal" data-subfield="hold_track_loop"><option value="false" ${sig.hold_track_loop ? '' : 'selected'}>No</option><option value="true" ${sig.hold_track_loop ? 'selected' : ''}>Yes</option></select></div>
@@ -892,6 +910,14 @@ function createAudioStep(track) {
   };
 }
 
+function createDelayStep(ms) {
+  const parsed = typeof ms === 'number' ? ms : parseInt(ms, 10);
+  return {
+    type: 'delay',
+    delay_ms: Number.isFinite(parsed) ? parsed : 0,
+  };
+}
+
 function updateDeviceField(field, value) {
   const dev = currentDevice();
   if (!dev) return;
@@ -940,6 +966,13 @@ function updateTemplateField(el) {
       break;
     }
     case 'uid-action': {
+      ensureUidTemplate(dev);
+      if (!dev.template?.uid) return;
+      const sub = el.dataset.subfield;
+      dev.template.uid[sub] = el.value;
+      break;
+    }
+    case 'uid-activation': {
       ensureUidTemplate(dev);
       if (!dev.template?.uid) return;
       const sub = el.dataset.subfield;
@@ -1208,6 +1241,10 @@ function setDeviceTemplate(dev, type) {
 function defaultUidTemplate() {
   return {
     slots: [],
+    start_topic: '',
+    start_payload: '',
+    broadcast_topic: '',
+    broadcast_payload: '',
     success_topic: '',
     success_payload: '',
     success_audio_track: '',
@@ -1299,6 +1336,10 @@ function ensureUidTemplate(dev) {
       tpl[key] = '';
     }
   });
+  tpl.start_topic = tpl.start_topic || '';
+  tpl.start_payload = tpl.start_payload || '';
+  tpl.broadcast_topic = tpl.broadcast_topic || '';
+  tpl.broadcast_payload = tpl.broadcast_payload || '';
 }
 
 function ensureSignalTemplate(dev) {
@@ -1316,6 +1357,56 @@ function ensureSignalTemplate(dev) {
   sig.heartbeat_timeout_ms = sig.heartbeat_timeout_ms || 0;
   sig.hold_track_loop = !!sig.hold_track_loop;
   sig.signal_on_ms = sig.signal_on_ms || 0;
+  ensureSignalScenario(dev, sig);
+}
+
+function ensureSignalScenario(dev, sig) {
+  if (!dev) {
+    return;
+  }
+  if (!Array.isArray(dev.scenarios)) {
+    dev.scenarios = [];
+  }
+  const matchId = (sc) => sc && typeof sc.id === 'string' && sc.id.toLowerCase() === 'signal_complete';
+  let scenario = dev.scenarios.find(matchId);
+  if (!scenario) {
+    scenario = {
+      id: 'signal_complete',
+      name: 'Signal hold complete',
+      button_enabled: false,
+      button_label: '',
+      steps: [],
+    };
+    dev.scenarios.push(scenario);
+  } else {
+    scenario.id = scenario.id || 'signal_complete';
+    if (!scenario.name) {
+      scenario.name = 'Signal hold complete';
+    }
+    if (typeof scenario.button_label !== 'string') {
+      scenario.button_label = '';
+    }
+  }
+  scenario.button_enabled = !!scenario.button_enabled;
+  if (!Array.isArray(scenario.steps)) {
+    scenario.steps = [];
+  }
+  if (scenario.steps.length === 0 && sig) {
+    const defaults = [];
+    if (sig.signal_topic) {
+      defaults.push(createMqttStep(sig.signal_topic, sig.signal_payload_on || ''));
+    }
+    if (sig.complete_track) {
+      defaults.push(createAudioStep(sig.complete_track));
+    }
+    if (sig.signal_on_ms > 0) {
+      defaults.push(createDelayStep(sig.signal_on_ms));
+    }
+    if (sig.signal_topic) {
+      defaults.push(createMqttStep(sig.signal_topic, sig.signal_payload_off || ''));
+    }
+    scenario.steps = defaults;
+  }
 }
 
 function ensureMqttTemplate(dev) {
@@ -1649,6 +1740,9 @@ function normalizeDevice(dev) {
     dev.scenarios = [];
   }
   dev.scenarios.forEach(normalizeScenario);
+  if (dev.template && dev.template.type === 'signal_hold') {
+    ensureSignalTemplate(dev);
+  }
 }
 
 function normalizeScenario(scen) {
@@ -2040,16 +2134,9 @@ function renderProfiles() {
     return;
   }
   state.profileList.innerHTML = profiles.map((profile) => {
-    const selected = profile.id === state.activeProfile;
-    const classes = ['dw-profile-chip'];
-    if (selected) {
-      classes.push('active');
-    }
+    const active = profile.id === state.activeProfile ? ' active' : '';
     const label = escapeHtml(profile.name || profile.id);
-    const live = profile.id === (state.liveProfile || '')
-      ? ' <span class="dw-badge dw-profile-active">Live</span>'
-      : '';
-    return `<div class="${classes.join(' ')}" data-profile-id="${escapeAttr(profile.id)}">${label}${live}</div>`;
+    return `<div class="dw-profile-chip${active}" data-profile-id="${escapeAttr(profile.id)}">${label}</div>`;
   }).join('');
 }
 
@@ -2075,8 +2162,11 @@ function renderActions() {
 }
 
 function createProfile(cloneId) {
-  const id = `profile_${Date.now().toString(16)}`;
-  const name = prompt('Display name:', '') || id;
+  const id = prompt('Profile id:', 'profile_' + Date.now().toString(16));
+  if (!id) {
+    return;
+  }
+  const name = prompt('Display name:', id) || id;
   let url = '/api/devices/profile/create?id=' + encodeURIComponent(id) +
     '&name=' + encodeURIComponent(name);
   if (cloneId) {
@@ -2088,11 +2178,10 @@ function createProfile(cloneId) {
 }
 
 function cloneProfile() {
-  const source = state.activeProfile;
-  if (!source) {
+  if (!state.activeProfile) {
     return;
   }
-  createProfile(source);
+  createProfile(state.activeProfile);
 }
 
 function downloadProfile() {
@@ -2109,57 +2198,40 @@ function downloadProfile() {
 }
 
 function renameProfile() {
-  const id = state.activeProfile;
-  if (!id) {
+  if (!state.activeProfile) {
     return;
   }
-  const name = prompt('New profile name:', id);
+  const name = prompt('New profile name:', state.activeProfile);
   if (!name) {
     return;
   }
-  fetch('/api/devices/profile/rename?id=' + encodeURIComponent(id) +
+  fetch('/api/devices/profile/rename?id=' + encodeURIComponent(state.activeProfile) +
     '&name=' + encodeURIComponent(name), {method: 'POST'})
     .then(() => loadModel())
     .catch(err => setStatus('Rename failed: ' + err.message, '#f87171'));
 }
 
 function deleteProfile() {
-  const id = state.activeProfile;
-  if (!id) {
+  if (!state.activeProfile) {
     return;
   }
-  if (!confirm('Delete profile ' + id + '?')) {
+  if (!confirm('Delete profile ' + state.activeProfile + '?')) {
     return;
   }
-  fetch('/api/devices/profile/delete?id=' + encodeURIComponent(id), {method: 'POST'})
+  fetch('/api/devices/profile/delete?id=' + encodeURIComponent(state.activeProfile), {method: 'POST'})
     .then(() => loadModel())
     .catch(err => setStatus('Delete failed: ' + err.message, '#f87171'));
 }
 
 function activateProfile(id) {
-  if (!id || state.busy) {
+  if (!id || id === state.activeProfile) {
     return;
   }
   state.activeProfile = id;
   renderProfiles();
-  setStatus('Loading profile...', '#fbbf24');
-  loadModel(id)
-    .then(() => {
-      setStatus('Activating profile...', '#fbbf24');
-      state.busy = true;
-      return fetch('/api/devices/profile/activate?id=' + encodeURIComponent(id), {method: 'POST'});
-    })
-    .then((r) => {
-      state.busy = false;
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      state.liveProfile = id;
-      setStatus('Profile activated', '#22c55e');
-      renderProfiles();
-    })
-    .catch(err => {
-      state.busy = false;
-      setStatus('Profile switch failed: ' + err.message, '#f87171');
-    });
+  fetch('/api/devices/profile/activate?id=' + encodeURIComponent(id), {method: 'POST'})
+    .then(() => loadModel())
+    .catch(err => setStatus('Activate failed: ' + err.message, '#f87171'));
 }
 
 function injectWizardStyles() {
