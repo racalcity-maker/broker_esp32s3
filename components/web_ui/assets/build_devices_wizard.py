@@ -13,10 +13,10 @@ def main():
     for part in parts:
         if not part.exists():
             raise FileNotFoundError(f"Wizard part not found: {part}")
-        content = part.read_text()
+        content = part.read_text(encoding="utf-8")
         chunks.append(content if content.endswith("\n") else content + "\n")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("".join(chunks))
+    out_path.write_text("".join(chunks), encoding="utf-8")
     return 0
 
 

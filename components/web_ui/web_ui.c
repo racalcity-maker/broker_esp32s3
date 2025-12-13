@@ -29,6 +29,7 @@
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "sdkconfig.h"
 
 #include "web_ui_page.h"
 #include "web_ui_utils.h"
@@ -1361,9 +1362,19 @@ static esp_err_t start_httpd(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.max_uri_handlers = 40; // many handlers registered
-    config.max_open_sockets = 12;  // allow up to a dozen concurrent clients
-    config.backlog_conn = 12;
-    config.lru_purge_enable = false; // avoid extra socket churn
+    config.max_open_sockets = 20;  // target max clients (clamped by LWIP budget below)
+    // Keep max_open_sockets within LWIP_MAX_SOCKETS budget (httpd uses ~3 internally).
+#ifdef CONFIG_LWIP_MAX_SOCKETS
+    int max_httpd_sockets = CONFIG_LWIP_MAX_SOCKETS - 3;
+    if (max_httpd_sockets < 1) {
+        max_httpd_sockets = 1;
+    }
+    if (config.max_open_sockets > max_httpd_sockets) {
+        config.max_open_sockets = max_httpd_sockets;
+    }
+#endif
+    config.backlog_conn = config.max_open_sockets;
+    config.lru_purge_enable = true; // drop oldest sockets instead of refusing new ones
     config.keep_alive_enable = false; // close connections immediately
     config.stack_size = 16384; // avoid stack overflow with larger handlers/pages
     #if WEB_UI_DEBUG

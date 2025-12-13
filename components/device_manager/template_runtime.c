@@ -28,6 +28,9 @@ typedef struct uid_runtime_entry {
     dm_uid_runtime_t runtime;
     char topics[DM_UID_TEMPLATE_MAX_SLOTS][DEVICE_MANAGER_TOPIC_MAX_LEN];
     size_t topic_count;
+    dm_uid_event_type_t last_action_event;
+    uint64_t last_action_ts_ms;
+    uint64_t last_start_ts_ms;
     char start_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
     char start_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
     char broadcast_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
@@ -635,9 +638,6 @@ static void publish_mqtt_payload(const char *topic, const char *payload)
         ESP_LOGW(TAG, "mqtt publish failed (%s): %s", topic, esp_err_to_name(err));
         return;
     }
-    // Forward local publications back through the template runtime so MQTT triggers
-    // and other template listeners react to internally generated events.
-    dm_template_runtime_handle_mqtt(topic, body);
 }
 
 static bool payload_matches(const char *expected, const char *actual)
@@ -670,6 +670,19 @@ static bool handle_uid_start_event(uid_runtime_entry_t *entry, const char *topic
     if (!payload_matches(entry->start_payload, payload)) {
         return false;
     }
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    if (entry->last_start_ts_ms > 0) {
+        uint64_t delta = (now_ms > entry->last_start_ts_ms) ? (now_ms - entry->last_start_ts_ms) : 0;
+        if (delta < 300) {
+            ESP_LOGW(TAG,
+                     "[UID] dev=%s start topic=%s suppressed (delta %llu ms)",
+                     entry->device_id,
+                     topic,
+                     (unsigned long long)delta);
+            return true;
+        }
+    }
+    entry->last_start_ts_ms = now_ms;
     ESP_LOGI(TAG,
              "[UID] dev=%s start topic=%s payload='%s'",
              entry->device_id,
@@ -719,6 +732,26 @@ static void apply_uid_action(const dm_uid_action_t *action)
     }
 }
 
+static bool uid_action_is_duplicate(uid_runtime_entry_t *entry, dm_uid_event_type_t ev)
+{
+    if (!entry) {
+        return false;
+    }
+    if (ev == DM_UID_EVENT_NONE || ev == DM_UID_EVENT_ACCEPTED || ev == DM_UID_EVENT_DUPLICATE) {
+        return false;
+    }
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    if (entry->last_action_event == ev && entry->last_action_ts_ms > 0) {
+        uint64_t delta = (now_ms > entry->last_action_ts_ms) ? (now_ms - entry->last_action_ts_ms) : 0;
+        if (delta < 200) {  // debounce duplicate actions within 200 ms
+            return true;
+        }
+    }
+    entry->last_action_event = ev;
+    entry->last_action_ts_ms = now_ms;
+    return false;
+}
+
 static bool handle_uid_message(const char *topic, const char *payload)
 {
     bool handled = false;
@@ -732,22 +765,16 @@ static bool handle_uid_message(const char *topic, const char *payload)
             if (entry->topics[t][0] && strcmp(entry->topics[t], topic) == 0) {
                 handled = true;
                 dm_uid_action_t action = dm_uid_runtime_handle_value(&entry->runtime, topic, body);
-                ESP_LOGI(TAG, "[UID] dev=%s topic=%s event=%s payload='%s'",
+                ESP_LOGD(TAG, "[UID] dev=%s topic=%s event=%s payload='%s'",
                          entry->device_id,
                          topic,
                          uid_event_str(action.event),
                          body);
-                apply_uid_action(&action);
-                switch (action.event) {
-                case DM_UID_EVENT_SUCCESS:
-                    trigger_uid_scenario(entry->device_id, "uid_success");
-                    break;
-                case DM_UID_EVENT_INVALID:
-                    trigger_uid_scenario(entry->device_id, "uid_fail");
-                    break;
-                default:
-                    break;
+                if (uid_action_is_duplicate(entry, action.event)) {
+                    ESP_LOGD(TAG, "[UID] dev=%s suppress duplicate event=%s", entry->device_id, uid_event_str(action.event));
+                    continue;
                 }
+                apply_uid_action(&action);
             }
         }
     }

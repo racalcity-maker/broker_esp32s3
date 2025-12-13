@@ -114,7 +114,7 @@ dm_uid_action_t dm_uid_runtime_handle_value(dm_uid_runtime_t *rt,
     }
     char cleaned_value[DM_UID_TEMPLATE_VALUE_MAX_LEN];
     sanitize_uid_value(value, cleaned_value, sizeof(cleaned_value));
-    ESP_LOGI(TAG, "incoming source='%s' raw='%s' clean='%s'",
+    ESP_LOGD(TAG, "incoming source='%s' raw='%s' clean='%s'",
              source_id ? source_id : "(null)",
              value ? value : "",
              cleaned_value);
@@ -129,17 +129,17 @@ dm_uid_action_t dm_uid_runtime_handle_value(dm_uid_runtime_t *rt,
                 rt->slots[idx].value[0] = '\0';
                 rt->slots[idx].has_value = false;
             }
-            ESP_LOGI(TAG, "slot[%d] label='%s' event=%s stored='%s' ok=%u/%u failed=%d",
+            ESP_LOGD(TAG, "slot[%d] label='%s' event=%s stored='%s' ok=%u/%u invalid_seen=%d",
                      idx,
                      ev.slot->label[0] ? ev.slot->label : ev.slot->source_id,
                      uid_event_str(ev.type),
                      rt->slots[idx].has_value ? rt->slots[idx].value : "",
                      (unsigned)rt->state.ok_count,
                      (unsigned)rt->config.slot_count,
-                     rt->state.failed);
+                     rt->state.invalid_seen);
         }
     } else {
-        ESP_LOGW(TAG, "source '%s' not found in template", source_id ? source_id : "(null)");
+        ESP_LOGD(TAG, "source '%s' not found in template", source_id ? source_id : "(null)");
     }
     action.event = ev.type;
     switch (ev.type) {

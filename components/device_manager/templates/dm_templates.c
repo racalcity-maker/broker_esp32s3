@@ -46,6 +46,20 @@ static void slot_set_ok(dm_uid_state_t *state, uint8_t index)
     state->ok_bitmap[byte] |= (uint8_t)(1U << bit);
 }
 
+static bool slot_marked_seen(const dm_uid_state_t *state, uint8_t index)
+{
+    uint8_t byte = index / 8;
+    uint8_t bit = index % 8;
+    return (state->seen_bitmap[byte] >> bit) & 0x01;
+}
+
+static void slot_set_seen(dm_uid_state_t *state, uint8_t index)
+{
+    uint8_t byte = index / 8;
+    uint8_t bit = index % 8;
+    state->seen_bitmap[byte] |= (uint8_t)(1U << bit);
+}
+
 void dm_uid_template_clear(dm_uid_template_t *tpl)
 {
     if (!tpl) {
@@ -111,29 +125,34 @@ dm_uid_event_t dm_uid_handle_value(dm_uid_state_t *state,
     if (tpl->slot_count == 0 || tpl->slot_count > DM_UID_TEMPLATE_MAX_SLOTS) {
         return event;
     }
-    if (state->failed) {
-        return event;
-    }
     int slot_index = find_slot_index(tpl, source_id);
     if (slot_index < 0) {
         return event;
     }
     const dm_uid_slot_t *slot = &tpl->slots[slot_index];
     event.slot = slot;
+    bool seen_before = slot_marked_seen(state, (uint8_t)slot_index);
+    if (!seen_before) {
+        slot_set_seen(state, (uint8_t)slot_index);
+        state->seen_count++;
+    }
     if (!uid_matches(slot, value)) {
-        state->failed = true;
-        event.type = DM_UID_EVENT_INVALID;
-        return event;
-    }
-    if (slot_marked_ok(state, (uint8_t)slot_index)) {
+        state->invalid_seen = true;
+        event.type = DM_UID_EVENT_NONE;
+    } else if (slot_marked_ok(state, (uint8_t)slot_index)) {
         event.type = DM_UID_EVENT_DUPLICATE;
-        return event;
+    } else {
+        slot_set_ok(state, (uint8_t)slot_index);
+        state->ok_count++;
+        event.type = DM_UID_EVENT_ACCEPTED;
     }
-    slot_set_ok(state, (uint8_t)slot_index);
-    state->ok_count++;
-    event.type = DM_UID_EVENT_ACCEPTED;
-    if (state->ok_count >= tpl->slot_count) {
-        event.type = DM_UID_EVENT_SUCCESS;
+    bool complete = state->seen_count >= tpl->slot_count;
+    if (complete) {
+        if (state->invalid_seen || state->ok_count < tpl->slot_count) {
+            event.type = DM_UID_EVENT_INVALID;
+        } else if (state->ok_count >= tpl->slot_count) {
+            event.type = DM_UID_EVENT_SUCCESS;
+        }
     }
     return event;
 }
@@ -143,7 +162,7 @@ bool dm_uid_state_is_complete(const dm_uid_state_t *state, const dm_uid_template
     if (!state || !tpl || tpl->slot_count == 0) {
         return false;
     }
-    return (!state->failed) && (state->ok_count >= tpl->slot_count);
+    return (!state->invalid_seen) && (state->ok_count >= tpl->slot_count);
 }
 
 void dm_signal_template_clear(dm_signal_hold_template_t *tpl)

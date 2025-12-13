@@ -404,6 +404,18 @@ static void free_session(mqtt_session_t *s)
     if (!s) {
         return;
     }
+    // Only the owning client task is allowed to tear down the session state.
+    // If another task asks to free it (e.g. when replacing a duplicate client),
+    // just wake the owner and let it clean up to avoid races and use-after-free.
+    TaskHandle_t current = xTaskGetCurrentTaskHandle();
+    if (s->task && s->task != current) {
+        s->suppress_will = true;
+        s->closing = true;
+        if (s->sock >= 0) {
+            shutdown(s->sock, SHUT_RDWR);
+        }
+        return;
+    }
     s->active = false;
     s->closing = false;
     if (s->sock >= 0) {
@@ -744,7 +756,8 @@ static int handle_connect(mqtt_session_t *sess, const uint8_t *buf, size_t len)
     mqtt_session_t *old = find_session_by_client_id(sess->client_id);
     if (old && old != sess) {
         ESP_LOGW(TAG, "Replacing session for client_id=%s", sess->client_id);
-        free_session(old);
+        old->suppress_will = true;
+        request_session_close(old, "duplicate client_id", 0);
     }
     unlock();
 

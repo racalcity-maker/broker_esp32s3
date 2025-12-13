@@ -61,12 +61,18 @@ const state = {
   wizardContent: null,
 };
 
+let initialized = false;
+
 function init() {
+  if (initialized) {
+    return;
+  }
   state.root = document.getElementById('device_wizard_root');
   state.actionsRoot = document.getElementById('actions_root');
   if (!state.root) {
     return;
   }
+  initialized = true;
   injectWizardStyles();
   buildShell();
   attachEvents();

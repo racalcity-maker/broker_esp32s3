@@ -61,12 +61,18 @@ const state = {
   wizardContent: null,
 };
 
+let initialized = false;
+
 function init() {
+  if (initialized) {
+    return;
+  }
   state.root = document.getElementById('device_wizard_root');
   state.actionsRoot = document.getElementById('actions_root');
   if (!state.root) {
     return;
   }
+  initialized = true;
   injectWizardStyles();
   buildShell();
   attachEvents();
@@ -2644,5 +2650,9 @@ function buildDeviceFromWizard() {
   }
   return base;
 }
-window.addEventListener('load', init);
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    init();
+} else {
+    window.addEventListener('load', init);
+}
 })();

@@ -62,8 +62,10 @@ typedef struct {
 
 typedef struct {
     uint8_t ok_bitmap[(DM_UID_TEMPLATE_MAX_SLOTS + 7) / 8];
+    uint8_t seen_bitmap[(DM_UID_TEMPLATE_MAX_SLOTS + 7) / 8];
     uint8_t ok_count;
-    bool failed;
+    uint8_t seen_count;
+    bool invalid_seen;
 } dm_uid_state_t;
 
 void dm_uid_template_clear(dm_uid_template_t *tpl);

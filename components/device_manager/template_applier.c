@@ -107,70 +107,12 @@ static void init_scenario(device_descriptor_t *dev,
     scenario->step_count = 0;
 }
 
-static bool has_uid_success_actions(const dm_uid_template_t *tpl)
-{
-    return (tpl->success_topic[0] ||
-            tpl->success_audio_track[0] ||
-            tpl->success_signal_topic[0]);
-}
-
-static bool has_uid_fail_actions(const dm_uid_template_t *tpl)
-{
-    return (tpl->fail_topic[0] ||
-            tpl->fail_audio_track[0] ||
-            tpl->fail_signal_topic[0]);
-}
-
-static void build_uid_scenario(device_descriptor_t *dev,
-                               const char *scenario_id,
-                               const char *scenario_name,
-                               const char *topic,
-                               const char *payload,
-                               const char *audio_track,
-                               const char *signal_topic,
-                               const char *signal_payload)
-{
-    if (!topic && !audio_track && !signal_topic) {
-        return;
-    }
-    if (dev->scenario_count >= DEVICE_MANAGER_MAX_SCENARIOS_PER_DEVICE) {
-        return;
-    }
-    device_scenario_t *scenario = &dev->scenarios[dev->scenario_count++];
-    init_scenario(dev, scenario, scenario_id, scenario_name);
-    add_mqtt_step(scenario, topic, payload);
-    add_audio_step(scenario, audio_track, false);
-    add_mqtt_step(scenario, signal_topic, signal_payload);
-}
-
 static esp_err_t apply_uid_template(device_descriptor_t *dev, const dm_uid_template_t *tpl)
 {
     dev->topic_count = 0;
     dev->scenario_count = 0;
 
-    if (has_uid_success_actions(tpl)) {
-        build_uid_scenario(dev,
-                           "uid_success",
-                           "UID Success",
-                           tpl->success_topic,
-                           tpl->success_payload,
-                           tpl->success_audio_track,
-                           tpl->success_signal_topic,
-                           tpl->success_signal_payload);
-    }
-
-    if (has_uid_fail_actions(tpl)) {
-        build_uid_scenario(dev,
-                           "uid_fail",
-                           "UID Fail",
-                           tpl->fail_topic,
-                           tpl->fail_payload,
-                           tpl->fail_audio_track,
-                           tpl->fail_signal_topic,
-                           tpl->fail_signal_payload);
-    }
-
-    return (dev->scenario_count > 0) ? ESP_OK : ESP_ERR_INVALID_STATE;
+    return ESP_OK;
 }
 
 static esp_err_t apply_signal_template(device_descriptor_t *dev, const dm_signal_hold_template_t *tpl)
