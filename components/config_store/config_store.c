@@ -76,8 +76,8 @@ static void load_defaults(app_config_t *cfg)
     // Пустой SSID => стартуем AP для конфигурации.
     cfg->wifi.ssid[0] = '\0';
     cfg->wifi.password[0] = '\0';
-    strncpy(cfg->wifi.hostname, "brocker", sizeof(cfg->wifi.hostname) - 1);
-    strncpy(cfg->mqtt.broker_id, "brocker", sizeof(cfg->mqtt.broker_id) - 1);
+    strncpy(cfg->wifi.hostname, "broker", sizeof(cfg->wifi.hostname) - 1);
+    strncpy(cfg->mqtt.broker_id, "broker", sizeof(cfg->mqtt.broker_id) - 1);
     cfg->mqtt.port = 1883;
     cfg->mqtt.keepalive_seconds = 30;
     cfg->mqtt.user_count = 0;

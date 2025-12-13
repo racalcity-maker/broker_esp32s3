@@ -16,6 +16,8 @@
 #include "config_store.h"
 #include "error_monitor.h"
 
+#define HOSTNAME_MAX_LEN (sizeof(((app_wifi_config_t *)0)->hostname))
+
 static const char *TAG = "network";
 static esp_netif_t *s_netif = NULL;
 static esp_netif_t *s_ap_netif = NULL;
@@ -93,15 +95,104 @@ static void schedule_runtime_reconnect(void)
     ESP_LOGW(TAG, "Wi-Fi disconnected, retrying in %d s", RUNTIME_RECONNECT_DELAY_SEC);
 }
 
+static bool s_mdns_started = false;
+static bool s_mdns_services_registered = false;
+
+static void sanitize_hostname(const char *input, char *out, size_t out_len)
+{
+    static const char *fallback = "broker";
+    if (!out || out_len == 0) {
+        return;
+    }
+    const char *src = (input && input[0]) ? input : fallback;
+    size_t di = 0;
+    for (size_t i = 0; src[i] != '\0' && di < out_len - 1; ++i) {
+        unsigned char ch = (unsigned char)src[i];
+        if (ch >= 'A' && ch <= 'Z') {
+            ch = (unsigned char)(ch - 'A' + 'a');
+        }
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+            out[di++] = (char)ch;
+        } else if (ch == ' ' || ch == '_' || ch == '-') {
+            if (di > 0 && out[di - 1] != '-') {
+                out[di++] = '-';
+            }
+        }
+    }
+    while (di > 0 && out[di - 1] == '-') {
+        di--;
+    }
+    if (di == 0) {
+        strncpy(out, fallback, out_len - 1);
+        di = strlen(out);
+    } else {
+        out[di] = '\0';
+    }
+    if (strcmp(out, "brocker") == 0) {
+        strncpy(out, "broker", out_len - 1);
+        out[out_len - 1] = '\0';
+    }
+}
+
+static void register_mdns_netif(esp_netif_t *netif)
+{
+    if (!s_mdns_started || !netif) {
+        return;
+    }
+    esp_err_t err = mdns_register_netif(netif);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "mDNS netif register failed: %s", esp_err_to_name(err));
+    }
+    err = mdns_netif_action(netif, MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_IP4_REVERSE_LOOKUP);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "mDNS enable failed: %s", esp_err_to_name(err));
+    }
+}
+
 static void start_mdns(const char *hostname)
 {
-    if (mdns_init() == ESP_OK) {
-        mdns_hostname_set(hostname);
-        mdns_instance_name_set("ESP32S3 Broker");
-        ESP_LOGI(TAG, "mDNS started: %s.local", hostname);
+    const app_config_t *cfg = config_store_get();
+    char host_clean[HOSTNAME_MAX_LEN] = {0};
+    if (hostname && hostname[0]) {
+        sanitize_hostname(hostname, host_clean, sizeof(host_clean));
+    } else if (cfg && cfg->wifi.hostname[0]) {
+        sanitize_hostname(cfg->wifi.hostname, host_clean, sizeof(host_clean));
     } else {
-        ESP_LOGW(TAG, "mDNS init failed");
+        sanitize_hostname(NULL, host_clean, sizeof(host_clean));
     }
+    if (!s_mdns_started) {
+        esp_err_t err = mdns_init();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "mDNS init failed: %s", esp_err_to_name(err));
+            return;
+        }
+        s_mdns_started = true;
+    }
+    register_mdns_netif(s_netif);
+    register_mdns_netif(s_ap_netif);
+    mdns_hostname_set(host_clean);
+    mdns_instance_name_set("ESP32S3 Broker");
+    if (s_mdns_services_registered) {
+        esp_err_t err = mdns_service_remove("_http", "_tcp");
+        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "mDNS http remove failed: %s", esp_err_to_name(err));
+        }
+        err = mdns_service_remove("_mqtt", "_tcp");
+        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "mDNS mqtt remove failed: %s", esp_err_to_name(err));
+        }
+    }
+    esp_err_t err = mdns_service_add("Broker UI", "_http", "_tcp", 80, NULL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS http service add failed: %s", esp_err_to_name(err));
+    }
+    int mqtt_port = (cfg && cfg->mqtt.port > 0) ? cfg->mqtt.port : 1883;
+    err = mdns_service_add("Broker MQTT", "_mqtt", "_tcp", mqtt_port, NULL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "mDNS mqtt service add failed: %s", esp_err_to_name(err));
+    }
+    s_mdns_services_registered = true;
+    ESP_LOGI(TAG, "mDNS up: http://%s.local/ (MQTT port %d)", host_clean, mqtt_port);
 }
 
 static bool s_sntp_started = false;
@@ -243,7 +334,9 @@ esp_err_t network_start(void)
         build_sta_config(cfg, &wifi_cfg);
 
         if (s_netif) {
-            esp_netif_set_hostname(s_netif, cfg->wifi.hostname);
+            char host_clean[HOSTNAME_MAX_LEN] = {0};
+            sanitize_hostname(cfg->wifi.hostname, host_clean, sizeof(host_clean));
+            esp_netif_set_hostname(s_netif, host_clean);
         }
 
         ESP_LOGI(TAG, "connecting to SSID=%s host=%s", cfg->wifi.ssid, cfg->wifi.hostname);
@@ -281,7 +374,9 @@ esp_err_t network_apply_wifi_config(void)
     }
     state_unlock();
     if (s_netif) {
-        esp_netif_set_hostname(s_netif, cfg->wifi.hostname);
+        char host_clean[HOSTNAME_MAX_LEN] = {0};
+        sanitize_hostname(cfg->wifi.hostname, host_clean, sizeof(host_clean));
+        esp_netif_set_hostname(s_netif, host_clean);
     }
 
     s_retry_count = 0;

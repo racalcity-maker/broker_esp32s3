@@ -439,6 +439,19 @@ static void sweep_idle_sessions(void)
     unlock();
 }
 
+static void request_session_close(mqtt_session_t *sess, const char *reason, int err)
+{
+    if (!sess) {
+        return;
+    }
+    const char *cid = sess->client_id[0] ? sess->client_id : "<unknown>";
+    ESP_LOGW(TAG, "%s for %s (err=%d)", reason ? reason : "session closing", cid, err);
+    sess->closing = true;
+    if (sess->sock >= 0) {
+        shutdown(sess->sock, SHUT_RDWR);
+    }
+}
+
 // (placeholder removed; free_session defined above)
 
 static void retain_free_entry(retain_entry_t *slot)
@@ -599,7 +612,13 @@ static int send_publish_packet(mqtt_session_t *sess, const char *topic, const ch
     }
     memcpy(&buf[idx], payload, payload_len);
     idx += payload_len;
-    return send_all(sess->sock, buf, idx);
+    int sent = send_all(sess->sock, buf, idx);
+    if (sent < 0) {
+        int err = errno;
+        request_session_close(sess, "publish send failed", err);
+        return -1;
+    }
+    return sent;
 }
 
 static void publish_to_subscribers(const char *topic, const char *payload, uint8_t qos, bool retain_flag, mqtt_session_t *exclude)
@@ -980,6 +999,8 @@ static void accept_task(void *param)
         setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
         struct timeval tmo = {.tv_sec = 5, .tv_usec = 0};
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tmo, sizeof(tmo));
+        struct timeval send_tmo = {.tv_sec = 2, .tv_usec = 0};
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &send_tmo, sizeof(send_tmo));
         lock();
         mqtt_session_t *sess = alloc_session();
         size_t slot = session_index(sess);
