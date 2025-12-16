@@ -890,42 +890,6 @@ function slugify(text) {
     || `device_${Date.now().toString(16)}`;
 }
 
-function createMqttStep(topic, payload) {
-  return {
-    type: 'mqtt_publish',
-    delay_ms: 0,
-    data: {
-      mqtt: {
-        topic: topic || '',
-        payload: payload || '',
-        qos: 0,
-        retain: false,
-      },
-    },
-  };
-}
-
-function createAudioStep(track) {
-  return {
-    type: 'audio_play',
-    delay_ms: 0,
-    data: {
-      audio: {
-        track: track || '',
-        blocking: false,
-      },
-    },
-  };
-}
-
-function createDelayStep(ms) {
-  const parsed = typeof ms === 'number' ? ms : parseInt(ms, 10);
-  return {
-    type: 'delay',
-    delay_ms: Number.isFinite(parsed) ? parsed : 0,
-  };
-}
-
 function refreshRequiredIndicators() {
   if (typeof validateRequiredFields === 'function') {
     validateRequiredFields();

@@ -25,26 +25,28 @@ static esp_err_t devices_js_handler(httpd_req_t *req)
     return httpd_resp_send(req, (const char *)_binary_devices_wizard_js_start, send_len);
 }
 
+static const httpd_uri_t s_devices_css_uri = {
+    .uri = "/ui/devices.css",
+    .method = HTTP_GET,
+    .handler = devices_css_handler,
+    .user_ctx = NULL,
+};
+
+static const httpd_uri_t s_devices_js_uri = {
+    .uri = "/ui/devices.js",
+    .method = HTTP_GET,
+    .handler = devices_js_handler,
+    .user_ctx = NULL,
+};
+
 esp_err_t web_ui_devices_register_assets(httpd_handle_t server)
 {
-    const httpd_uri_t css_uri = {
-        .uri = "/ui/devices.css",
-        .method = HTTP_GET,
-        .handler = devices_css_handler,
-        .user_ctx = NULL,
-    };
-    const httpd_uri_t js_uri = {
-        .uri = "/ui/devices.js",
-        .method = HTTP_GET,
-        .handler = devices_js_handler,
-        .user_ctx = NULL,
-    };
-    esp_err_t err = httpd_register_uri_handler(server, &css_uri);
+    esp_err_t err = httpd_register_uri_handler(server, &s_devices_css_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "register css failed: %s", esp_err_to_name(err));
         return err;
     }
-    err = httpd_register_uri_handler(server, &js_uri);
+    err = httpd_register_uri_handler(server, &s_devices_js_uri);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "register js failed: %s", esp_err_to_name(err));
         return err;
