@@ -152,7 +152,8 @@ After saving, monitor logs. Every 10 seconds `[Interval] dev=heartbeat_task scen
 
 1. **Save changes** in the Devices tab after editing any template.
 2. Switch to **Status → Automation** to verify flags, interval timers, and scenario queues in real time.
-3. Use `/api/devices/run?device=<id>&scenario=<name>` for manual firing when testing.
-4. If changes do not apply instantly, click **Reload** to force runtime refresh, then retry.
+3. Watch **Status → Overview** to track free DRAM/PSRAM; refresh a few times while running scenarios to catch memory drops early.
+4. Use `/api/devices/run?device=<id>&scenario=<name>` for manual firing when testing.
+5. If changes do not apply instantly, click **Reload** to force runtime refresh, then retry.
 
 With these steps you can add a device, bind it to the appropriate template, and wire scenarios entirely from the UI without touching firmware code.

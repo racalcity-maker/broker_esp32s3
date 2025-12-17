@@ -49,7 +49,7 @@ Useful `menuconfig` sections:
 ## Runtime Configuration Flow
 
 1. **Wi-Fi**: on first boot the ESP32 brings up its AP and, if STA credentials are set, also tries to join the configured network. The UI shows both AP and STA IPs.
-2. **Web UI**: visit `http://<device-ip>/` and open the tabs (Status, Audio, Devices, Settings). Status exposes Wi-Fi, MQTT sessions, automation flags, SD card state.
+2. **Web UI**: visit `http://<device-ip>/` and open the tabs (Status, Audio, Devices, Settings). Status exposes Wi-Fi, MQTT sessions, automation flags, SD card state, and live DRAM/PSRAM usage so you can catch memory leaks early.
 3. **MQTT broker**: clients connect directly to the ESP32 on the configured port (default 1883). The ACL table in `mqtt_core` restricts publish/subscribe prefixes per client ID.
 4. **Profiles**: in the Devices tab use the list on the left to add/clone/delete profiles. Only the active profile stays in PSRAM; everything else is serialized to `/sdcard/.dm_profiles`.
 5. **Devices & templates**: add devices via Simple editor or Wizard, choose the template, and fill its fields (slots, heartbeats, MQTT routes). Scenarios and topics appear under the template card.
@@ -118,13 +118,21 @@ Automation workers pull jobs from a queue, allowing multiple devices to run in p
 
 ## Web UI Tour
 
-- **Status**: Wi-Fi state, MQTT server stats, SD health, current flags, automation worker load. Provides form inputs for Wi-Fi/MQTT configuration.
+- **Status**: Wi-Fi state, MQTT server stats, SD health, **free DRAM/PSRAM headroom**, current flags, automation worker load. Provides form inputs for Wi-Fi/MQTT configuration.
 - **Audio**: browse SD tracks, play/pause/stop manually, configure default volume, and test amplifier GPIO.
 - **Devices**: two editors:
   - *Simple editor* for direct JSON-backed editing (tabs, topics, scenarios, templates).
   - *Wizard* for a guided flow to add templates quickly.
   JSON preview at the bottom shows what will be saved; you can copy it for backups.
 - **Settings**: firmware info, OTA slot, ability to reboot the device, and API links.
+
+### Web UI Roles
+
+- **Admin** (default) sees все вкладки и может редактировать устройства, профили, MQTT/веб-настройки. Этой ролью вы авторизуетесь стандартными `admin/admin` или любыми новыми учётными данными.
+- **Operator/User** — облегчённый режим для полевых сценариев. Его можно включить на вкладке Settings → Operator account: задать отдельный логин/пароль и включить флажок `Enable operator`.
+  - После входа оператор попадает сразу во вкладку *Actions*, где показаны только карточки сценариев с компактными кнопками, масштабированными под телефоны.
+  - Остальные вкладки скрыты, так что оператор не сможет случайно изменить конфигурацию.
+  - Администратор может отключить оператора или поменять его пароль в любой момент; при отключении все активные сессии закрываются.
 
 ### Web UI Authentication
 
