@@ -81,3 +81,7 @@
 .dw-action-btn:hover{border-color:#38bdf8;color:#fff;}
 .dw-list-empty{padding:12px;color:#94a3b8;font-size:12px;}
 .dw-slot-last .dw-last-value{border:1px dashed #1f2430;border-radius:8px;padding:6px 10px;background:#04060e;color:#94a3b8;font-size:12px;}
+body.role-user .actions-root{gap:8px;}
+body.role-user .dw-action-group{padding:10px;margin-bottom:8px;}
+body.role-user .dw-action-buttons{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:6px;}
+body.role-user .dw-action-btn{font-size:12px;padding:10px 8px;min-height:44px;border-radius:6px;text-align:center;}

@@ -46,6 +46,8 @@ typedef struct {
     app_mqtt_config_t mqtt;
     app_time_config_t time;
     app_web_auth_t web;
+    app_web_auth_t web_user;
+    bool web_user_enabled;
     bool verbose_logging;
 } app_config_t;
 
@@ -55,4 +57,5 @@ esp_err_t config_store_set(const app_config_t *next);
 esp_err_t config_store_reset_defaults(void);
 void config_store_hash_password(const char *password, uint8_t out_hash[CONFIG_STORE_AUTH_HASH_LEN]);
 esp_err_t config_store_set_web_auth(const char *username, const uint8_t hash[CONFIG_STORE_AUTH_HASH_LEN]);
+esp_err_t config_store_set_web_user(const char *username, const uint8_t hash[CONFIG_STORE_AUTH_HASH_LEN], bool enabled);
 esp_err_t config_store_reset_web_auth_defaults(void);

@@ -84,6 +84,8 @@ static void load_defaults(app_config_t *cfg)
     strncpy(cfg->time.ntp_server, "pool.ntp.org", sizeof(cfg->time.ntp_server) - 1);
     cfg->time.timezone_offset_min = 180;
     apply_default_web_auth(&cfg->web);
+    memset(&cfg->web_user, 0, sizeof(cfg->web_user));
+    cfg->web_user_enabled = false;
     cfg->verbose_logging = false;
 }
 
@@ -167,6 +169,9 @@ static bool validate_config(const app_config_t *cfg)
         return false;
     }
     if (!validate_web_auth(&cfg->web)) {
+        return false;
+    }
+    if (cfg->web_user_enabled && !validate_web_auth(&cfg->web_user)) {
         return false;
     }
     return true;
@@ -325,6 +330,36 @@ esp_err_t config_store_reset_web_auth_defaults(void)
     *snapshot = g_config;
     config_unlock();
     apply_default_web_auth(&snapshot->web);
+    memset(&snapshot->web_user, 0, sizeof(snapshot->web_user));
+    snapshot->web_user_enabled = false;
+    esp_err_t err = config_store_set(snapshot);
+    free(snapshot);
+    return err;
+}
+
+esp_err_t config_store_set_web_user(const char *username, const uint8_t hash[CONFIG_STORE_AUTH_HASH_LEN], bool enabled)
+{
+    if (enabled) {
+        if (!username || !hash) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        if (!validate_string(username, CONFIG_STORE_USERNAME_MAX) || !hash_is_nonzero(hash)) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    app_config_t *snapshot = malloc(sizeof(app_config_t));
+    if (!snapshot) {
+        return ESP_ERR_NO_MEM;
+    }
+    config_lock();
+    *snapshot = g_config;
+    config_unlock();
+    snapshot->web_user_enabled = enabled;
+    memset(&snapshot->web_user, 0, sizeof(snapshot->web_user));
+    if (enabled) {
+        strncpy(snapshot->web_user.username, username, sizeof(snapshot->web_user.username) - 1);
+        memcpy(snapshot->web_user.password_hash, hash, CONFIG_STORE_AUTH_HASH_LEN);
+    }
     esp_err_t err = config_store_set(snapshot);
     free(snapshot);
     return err;

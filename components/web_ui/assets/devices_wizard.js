@@ -59,14 +59,29 @@ const state = {
   },
   wizardModal: null,
   wizardContent: null,
+  userRole: 'admin',
 };
 
 let initialized = false;
+let waitingForRole = false;
 
 function init() {
   if (initialized) {
     return;
   }
+  const currentRole = (window.__WEB_SESSION && window.__WEB_SESSION.role) || '';
+  if (!currentRole) {
+    const promise = window.__sessionRolePromise;
+    if (promise && typeof promise.then === 'function' && !waitingForRole) {
+      waitingForRole = true;
+      promise.finally(() => {
+        waitingForRole = false;
+        init();
+      });
+      return;
+    }
+  }
+  state.userRole = currentRole || state.userRole || 'admin';
   state.root = document.getElementById('device_wizard_root');
   state.actionsRoot = document.getElementById('actions_root');
   if (!state.root) {
