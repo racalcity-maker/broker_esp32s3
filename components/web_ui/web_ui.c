@@ -159,6 +159,15 @@ static cJSON *sensor_threshold_json(const dm_sensor_threshold_t *th)
     if (th->scenario[0]) {
         cJSON_AddStringToObject(obj, "scenario", th->scenario);
     }
+    if (th->hysteresis > 0) {
+        cJSON_AddNumberToObject(obj, "hysteresis", (double)th->hysteresis);
+    }
+    if (th->min_duration_ms > 0) {
+        cJSON_AddNumberToObject(obj, "min_duration_ms", (double)th->min_duration_ms);
+    }
+    if (th->cooldown_ms > 0) {
+        cJSON_AddNumberToObject(obj, "cooldown_ms", (double)th->cooldown_ms);
+    }
     return obj;
 }
 
@@ -245,59 +254,74 @@ static char *build_sensor_monitor_json(void)
     }
     for (size_t i = 0; i < count && i < DEVICE_MANAGER_MAX_DEVICES; ++i) {
         const dm_sensor_runtime_snapshot_t *snap = &snapshots[i];
-        cJSON *obj = cJSON_CreateObject();
-        if (!obj) {
-            cJSON_Delete(root);
-            return dup_empty_json_array();
-        }
-        cJSON_AddStringToObject(obj, "device", snap->device_id);
-        const char *name = snap->config.name[0] ? snap->config.name : snap->device_id;
-        cJSON_AddStringToObject(obj, "name", name);
-        cJSON_AddStringToObject(obj, "topic", snap->config.topic);
-        if (snap->config.description[0]) {
-            cJSON_AddStringToObject(obj, "description", snap->config.description);
-        }
-        if (snap->config.units[0]) {
-            cJSON_AddStringToObject(obj, "units", snap->config.units);
-        }
-        cJSON_AddNumberToObject(obj, "decimals", snap->config.decimals);
-        cJSON_AddBoolToObject(obj, "display", snap->config.display_monitor);
-        cJSON_AddBoolToObject(obj, "history_enabled", snap->config.history_enabled);
-        cJSON_AddStringToObject(obj, "status", sensor_status_to_string(snap->status));
-        if (snap->has_value) {
-            cJSON_AddNumberToObject(obj, "value", (double)snap->last_value);
-            cJSON_AddNumberToObject(obj, "updated_ms", (double)snap->last_update_ms);
-        }
-        cJSON *warn = sensor_threshold_json(&snap->config.warn);
-        if (warn) {
-            cJSON_AddItemToObject(obj, "warn", warn);
-        }
-        cJSON *alarm = sensor_threshold_json(&snap->config.alarm);
-        if (alarm) {
-            cJSON_AddItemToObject(obj, "alarm", alarm);
-        }
-        if (snap->history_count > 0 && snap->config.history_enabled) {
-            cJSON *hist = cJSON_AddArrayToObject(obj, "history");
-            if (!hist) {
-                cJSON_Delete(obj);
+        for (uint8_t c = 0; c < snap->channel_count && c < DM_SENSOR_TEMPLATE_MAX_CHANNELS; ++c) {
+            const dm_sensor_channel_runtime_snapshot_t *channel = &snap->channels[c];
+            const dm_sensor_channel_t *cfg = &channel->config;
+            if (!cfg->topic[0]) {
+                continue;
+            }
+            cJSON *obj = cJSON_CreateObject();
+            if (!obj) {
                 cJSON_Delete(root);
                 return dup_empty_json_array();
             }
-            for (uint8_t h = 0; h < snap->history_count && h < DM_SENSOR_HISTORY_MAX_SAMPLES; ++h) {
-                const dm_sensor_history_sample_t *sample = &snap->history[h];
-                cJSON *entry = cJSON_CreateObject();
-                if (!entry) {
+            cJSON_AddStringToObject(obj, "device", snap->device_id);
+            if (snap->device_name[0]) {
+                cJSON_AddStringToObject(obj, "device_name", snap->device_name);
+            }
+            if (cfg->id[0]) {
+                cJSON_AddStringToObject(obj, "channel_id", cfg->id);
+            }
+            const char *name = cfg->name[0] ? cfg->name : snap->device_id;
+            cJSON_AddStringToObject(obj, "name", name);
+            cJSON_AddStringToObject(obj, "topic", cfg->topic);
+            if (cfg->description[0]) {
+                cJSON_AddStringToObject(obj, "description", cfg->description);
+            } else if (snap->description[0]) {
+                cJSON_AddStringToObject(obj, "description", snap->description);
+            }
+            if (cfg->units[0]) {
+                cJSON_AddStringToObject(obj, "units", cfg->units);
+            }
+            cJSON_AddNumberToObject(obj, "decimals", cfg->decimals);
+            cJSON_AddBoolToObject(obj, "display", cfg->display_monitor);
+            cJSON_AddBoolToObject(obj, "history_enabled", cfg->history_enabled);
+            cJSON_AddStringToObject(obj, "status", sensor_status_to_string(channel->status));
+            if (channel->has_value) {
+                cJSON_AddNumberToObject(obj, "value", (double)channel->last_value);
+                cJSON_AddNumberToObject(obj, "updated_ms", (double)channel->last_update_ms);
+            }
+            cJSON *warn = sensor_threshold_json(&cfg->warn);
+            if (warn) {
+                cJSON_AddItemToObject(obj, "warn", warn);
+            }
+            cJSON *alarm = sensor_threshold_json(&cfg->alarm);
+            if (alarm) {
+                cJSON_AddItemToObject(obj, "alarm", alarm);
+            }
+            if (channel->history_count > 0 && cfg->history_enabled) {
+                cJSON *hist = cJSON_AddArrayToObject(obj, "history");
+                if (!hist) {
                     cJSON_Delete(obj);
                     cJSON_Delete(root);
                     return dup_empty_json_array();
                 }
-                cJSON_AddItemToArray(hist, entry);
-                cJSON_AddNumberToObject(entry, "value", (double)sample->value);
-                cJSON_AddStringToObject(entry, "status", sensor_status_to_string(sample->status));
-                cJSON_AddNumberToObject(entry, "timestamp_ms", (double)sample->timestamp_ms);
+                for (uint8_t h = 0; h < channel->history_count && h < DM_SENSOR_HISTORY_MAX_SAMPLES; ++h) {
+                    const dm_sensor_history_sample_t *sample = &channel->history[h];
+                    cJSON *entry = cJSON_CreateObject();
+                    if (!entry) {
+                        cJSON_Delete(obj);
+                        cJSON_Delete(root);
+                        return dup_empty_json_array();
+                    }
+                    cJSON_AddItemToArray(hist, entry);
+                    cJSON_AddNumberToObject(entry, "value", (double)sample->value);
+                    cJSON_AddStringToObject(entry, "status", sensor_status_to_string(sample->status));
+                    cJSON_AddNumberToObject(entry, "timestamp_ms", (double)sample->timestamp_ms);
+                }
             }
+            cJSON_AddItemToArray(root, obj);
         }
-        cJSON_AddItemToArray(root, obj);
     }
     char *printed = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);

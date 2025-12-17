@@ -150,27 +150,32 @@ After saving, monitor logs. Every 10 seconds `[Interval] dev=heartbeat_task scen
 
 ## 7. Sensor Monitor (telemetry + warn/alarm thresholds)
 
-**Goal:** Ingest MQTT telemetry (temperature, pressure, heartbeat timers, etc.), display it on the Monitoring tab, and optionally trigger scenarios when warn/alarm thresholds are reached.
+**Goal:** Ingest MQTT telemetry (temperature, humidity, pressure, etc.), display it on the Monitoring tab, and optionally trigger scenarios when warn/alarm thresholds are reached. Each device can now expose **multiple channels** (for example `temperature`, `humidity`, `co2`) without cloning the template.
 
 ### Device fields
 1. Add device `sensor_room_a`, choose **Sensor Monitor**.
 2. Template fields:
-   - `Sensor name` controls the card title; use something meaningful like "Room A temperature".
-   - `Topic` is the MQTT source (for example `room/a/temp`).
-   - `Parse mode`: keep **Raw number** if payloads are plain numbers (`23.5`). Choose **JSON number** when the payload is JSON, then set `JSON key` (for example `value` for `{ "value": 23.5 }`).
-   - `Units` / `Decimals`: shown on the Monitoring card; decimals also control comparison precision.
-   - `Display on Monitoring tab`: leave enabled to show the sensor to admins/operators. Disable if you only want thresholds without UI.
-   - `History`: keep enabled to see the last few readings on each card.
-   - `Warn threshold`: enable, set `Value` (for example `28`), choose comparison (`Above or equal` / `Below or equal`), and enter the scenario ID to run (e.g. `warn_temp`).
-   - `Alarm threshold`: same as warn but for a higher (or lower) value with its own scenario (e.g. `alarm_temp`).
+   - `Base topic` is the default MQTT source (`room/a/telemetry`). Every channel inherits this topic unless you override it.
+   - `Parse mode`: keep **Raw number** if payloads are plain numbers (`23.5`). Choose **JSON number** when the payload is JSON, then set `JSON key` (for example `temperature` for `{ "temperature": 23.5, "humidity": 40 }`).
+   - `Display on Monitoring tab` / `History` toggle the visibility/history buffer for new channels.
+   - Under **Channels** add one entry per measurement. Example configuration:
+     - Channel 1 (Temperature): `Channel ID = temp`, `Name = Room A temperature`, `JSON key = temperature`, `Units = °C`, `Decimals = 1`. Leave `Topic` empty to inherit the base topic.
+     - Channel 2 (Humidity): `Channel ID = humidity`, `Name = Room A RH`, `JSON key = humidity`, `Units = %`, `Decimals = 1`.
+     - Channel 3 (CO2): override `Topic = room/a/co2`, keep `Parse mode = Raw number`.
+   - Each channel has its own `Warn` / `Alarm` thresholds. Enable them, set the comparison (≥ or ≤), numeric value, and the scenario ID to fire (`warn_temp`, `alarm_temp`, `warn_co2`, etc.).
+   - Optional stability controls per threshold:
+     - `Hysteresis` (same units as the sensor) keeps the status latched until the value crosses a second boundary.
+     - `Minimum duration (ms)` requires the value to stay beyond the boundary before the status flips.
+     - `Cooldown (ms)` blocks repeated triggers for the same threshold until the timer expires.
 
 ### Scenarios
-Create scenarios referenced in the warn/alarm sections:
-- `warn_temp`: publish MQTT hint (`room/a/hint -> "Temperatures rising"`) and maybe blink indicator lights.
+Create the scenarios referenced in the warn/alarm sections:
+- `warn_temp`: publish MQTT hint (`room/a/hint -> "Temperatures rising"`) and blink indicator lights.
 - `alarm_temp`: play siren audio, publish MQTT `room/a/hvac -> "shutdown"`, and set automation flags for downstream logic.
+- `warn_co2`: play a message or open a valve.
 
 ### Test
-Publish telemetry to the configured topic. For raw numbers, use `mosquitto_pub -t room/a/temp -m 27.5`; for JSON mode send `{"value":31.2}`. Watch the Monitoring tab: the card shows the live value, unit, and history chips. When the warn/alarm threshold is crossed the status badge changes color and the linked scenario runs (check logs for `[Sensor] dev=... status=warn/alarm`).
+Publish telemetry to the configured topics. For JSON payloads, send `{"temperature":27.5,"humidity":38}`; for raw channels publish `mosquitto_pub -t room/a/co2 -m 1200`. Watch the Monitoring tab: each channel becomes its own card showing value, device name, warn/alarm badges, thresholds, and the last few samples. When a threshold is crossed the badge changes color and the linked scenario runs (check logs for `[Sensor] dev=... channel=... status=warn/alarm`).
 
 ---
 

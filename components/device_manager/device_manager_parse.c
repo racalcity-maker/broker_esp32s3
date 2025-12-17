@@ -102,9 +102,125 @@ static void sensor_threshold_from_json(dm_sensor_threshold_t *dst, const cJSON *
     if (cJSON_IsString(scenario) && scenario->valuestring) {
         dm_str_copy(dst->scenario, sizeof(dst->scenario), scenario->valuestring);
     }
+    const cJSON *hyst = cJSON_GetObjectItem(obj, "hysteresis");
+    if (cJSON_IsNumber(hyst)) {
+        dst->hysteresis = (float)hyst->valuedouble;
+        if (dst->hysteresis < 0) {
+            dst->hysteresis = 0;
+        }
+    }
+    dst->min_duration_ms = json_number_to_u32(cJSON_GetObjectItem(obj, "min_duration_ms"), dst->min_duration_ms);
+    dst->cooldown_ms = json_number_to_u32(cJSON_GetObjectItem(obj, "cooldown_ms"), dst->cooldown_ms);
     if (!enabled_explicit && (cJSON_IsNumber(value) || (cJSON_IsString(scenario) && scenario->valuestring))) {
         dst->enabled = true;
     }
+}
+
+static void sensor_channel_apply_defaults(dm_sensor_channel_t *dst, const dm_sensor_template_t *tpl)
+{
+    if (!dst || !tpl) {
+        return;
+    }
+    memset(dst, 0, sizeof(*dst));
+    dst->value_type = tpl->value_type;
+    dst->parse_mode = tpl->parse_mode;
+    dst->decimals = tpl->decimals;
+    dst->display_monitor = tpl->display_monitor;
+    dst->history_enabled = tpl->history_enabled;
+    dst->warn = tpl->warn;
+    dst->alarm = tpl->alarm;
+    if (tpl->name[0]) {
+        dm_str_copy(dst->name, sizeof(dst->name), tpl->name);
+    }
+    if (tpl->description[0]) {
+        dm_str_copy(dst->description, sizeof(dst->description), tpl->description);
+    }
+    if (tpl->topic[0]) {
+        dm_str_copy(dst->topic, sizeof(dst->topic), tpl->topic);
+    }
+    if (tpl->json_key[0]) {
+        dm_str_copy(dst->json_key, sizeof(dst->json_key), tpl->json_key);
+    }
+    if (tpl->units[0]) {
+        dm_str_copy(dst->units, sizeof(dst->units), tpl->units);
+    }
+}
+
+static bool sensor_channel_from_json(dm_sensor_channel_t *dst,
+                                     const dm_sensor_template_t *tpl,
+                                     const cJSON *obj)
+{
+    if (!dst || !tpl || !cJSON_IsObject(obj)) {
+        return false;
+    }
+    dm_sensor_channel_t tmp;
+    sensor_channel_apply_defaults(&tmp, tpl);
+    const cJSON *channel_id = cJSON_GetObjectItem(obj, "id");
+    if (!cJSON_IsString(channel_id) || !channel_id->valuestring[0]) {
+        channel_id = cJSON_GetObjectItem(obj, "channel_id");
+    }
+    if (cJSON_IsString(channel_id) && channel_id->valuestring) {
+        dm_str_copy(tmp.id, sizeof(tmp.id), channel_id->valuestring);
+    }
+    const cJSON *name = cJSON_GetObjectItem(obj, "name");
+    if (cJSON_IsString(name) && name->valuestring) {
+        dm_str_copy(tmp.name, sizeof(tmp.name), name->valuestring);
+    }
+    const cJSON *desc = cJSON_GetObjectItem(obj, "description");
+    if (cJSON_IsString(desc) && desc->valuestring) {
+        dm_str_copy(tmp.description, sizeof(tmp.description), desc->valuestring);
+    }
+    const cJSON *topic = cJSON_GetObjectItem(obj, "topic");
+    if (cJSON_IsString(topic) && topic->valuestring) {
+        dm_str_copy(tmp.topic, sizeof(tmp.topic), topic->valuestring);
+    }
+    const cJSON *units = cJSON_GetObjectItem(obj, "units");
+    if (cJSON_IsString(units) && units->valuestring) {
+        dm_str_copy(tmp.units, sizeof(tmp.units), units->valuestring);
+    }
+    const cJSON *decimals = cJSON_GetObjectItem(obj, "decimals");
+    if (cJSON_IsNumber(decimals)) {
+        int d = (int)decimals->valuedouble;
+        if (d < 0) {
+            d = 0;
+        } else if (d > 6) {
+            d = 6;
+        }
+        tmp.decimals = (uint8_t)d;
+    }
+    const cJSON *parse_mode = cJSON_GetObjectItem(obj, "parse_mode");
+    if (cJSON_IsString(parse_mode) && parse_mode->valuestring) {
+        sensor_parse_mode_from_string(parse_mode->valuestring, &tmp.parse_mode);
+    }
+    const cJSON *json_key = cJSON_GetObjectItem(obj, "json_key");
+    if (cJSON_IsString(json_key) && json_key->valuestring) {
+        dm_str_copy(tmp.json_key, sizeof(tmp.json_key), json_key->valuestring);
+    }
+    tmp.display_monitor =
+        json_get_bool_default(cJSON_GetObjectItem(obj, "display_monitor"), tmp.display_monitor);
+    tmp.history_enabled =
+        json_get_bool_default(cJSON_GetObjectItem(obj, "history_enabled"), tmp.history_enabled);
+    sensor_threshold_from_json(&tmp.warn, cJSON_GetObjectItem(obj, "warn"));
+    sensor_threshold_from_json(&tmp.alarm, cJSON_GetObjectItem(obj, "alarm"));
+    if (tmp.parse_mode == DM_SENSOR_PARSE_JSON_NUMBER && !tmp.json_key[0]) {
+        return false;
+    }
+    if (!tmp.topic[0]) {
+        return false;
+    }
+    if (!tmp.name[0]) {
+        if (tmp.id[0]) {
+            dm_str_copy(tmp.name, sizeof(tmp.name), tmp.id);
+        } else if (tmp.json_key[0]) {
+            dm_str_copy(tmp.name, sizeof(tmp.name), tmp.json_key);
+        } else if (tpl->name[0]) {
+            dm_str_copy(tmp.name, sizeof(tmp.name), tpl->name);
+        } else {
+            dm_str_copy(tmp.name, sizeof(tmp.name), tmp.topic);
+        }
+    }
+    *dst = tmp;
+    return true;
 }
 
 static bool sensor_template_from_json(dm_sensor_template_t *tpl, const cJSON *obj)
@@ -154,10 +270,38 @@ static bool sensor_template_from_json(dm_sensor_template_t *tpl, const cJSON *ob
         json_get_bool_default(cJSON_GetObjectItem(obj, "history_enabled"), tpl->history_enabled);
     sensor_threshold_from_json(&tpl->warn, cJSON_GetObjectItem(obj, "warn"));
     sensor_threshold_from_json(&tpl->alarm, cJSON_GetObjectItem(obj, "alarm"));
-    if (tpl->parse_mode == DM_SENSOR_PARSE_JSON_NUMBER && !tpl->json_key[0]) {
-        return false;
+    const cJSON *channels = cJSON_GetObjectItem(obj, "channels");
+    if (cJSON_IsArray(channels)) {
+        uint8_t index = 0;
+        const cJSON *item = NULL;
+        cJSON_ArrayForEach(item, channels)
+        {
+            if (index >= DM_SENSOR_TEMPLATE_MAX_CHANNELS) {
+                break;
+            }
+            dm_sensor_channel_t *channel = &tpl->channels[index];
+            if (!sensor_channel_from_json(channel, tpl, item)) {
+                continue;
+            }
+            index++;
+        }
+        tpl->channel_count = index;
     }
-    return tpl->topic[0] != 0;
+    if (tpl->channel_count == 0) {
+        if (!tpl->topic[0]) {
+            return false;
+        }
+        dm_sensor_channel_t *channel = &tpl->channels[0];
+        sensor_channel_apply_defaults(channel, tpl);
+        tpl->channel_count = 1;
+        if (channel->parse_mode == DM_SENSOR_PARSE_JSON_NUMBER && !channel->json_key[0]) {
+            return false;
+        }
+    }
+    if (tpl->channel_count > DM_SENSOR_TEMPLATE_MAX_CHANNELS) {
+        tpl->channel_count = DM_SENSOR_TEMPLATE_MAX_CHANNELS;
+    }
+    return true;
 }
 
 // Parse UID validator configuration from JSON into struct.

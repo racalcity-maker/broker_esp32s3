@@ -54,6 +54,15 @@ static cJSON *sensor_threshold_to_json(const dm_sensor_threshold_t *th)
     cJSON_AddNumberToObject(obj, "value", (double)th->threshold);
     cJSON_AddStringToObject(obj, "compare", sensor_compare_to_string(th->compare));
     template_to_json_string(obj, "scenario", th->scenario);
+    if (th->hysteresis > 0) {
+        cJSON_AddNumberToObject(obj, "hysteresis", (double)th->hysteresis);
+    }
+    if (th->min_duration_ms > 0) {
+        cJSON_AddNumberToObject(obj, "min_duration_ms", (double)th->min_duration_ms);
+    }
+    if (th->cooldown_ms > 0) {
+        cJSON_AddNumberToObject(obj, "cooldown_ms", (double)th->cooldown_ms);
+    }
     return obj;
 }
 
@@ -419,25 +428,73 @@ static cJSON *sensor_template_to_json(const dm_sensor_template_t *tpl)
     if (!root) {
         return NULL;
     }
-    template_to_json_string(root, "name", tpl->name);
-    template_to_json_string(root, "topic", tpl->topic);
-    template_to_json_string(root, "description", tpl->description);
-    template_to_json_string(root, "units", tpl->units);
-    if (tpl->decimals > 0) {
-        cJSON_AddNumberToObject(root, "decimals", tpl->decimals);
+    const dm_sensor_channel_t *base_channel = NULL;
+    if (tpl->channel_count > 0) {
+        base_channel = &tpl->channels[0];
     }
+    template_to_json_string(root, "name", base_channel ? base_channel->name : tpl->name);
+    template_to_json_string(root, "topic", base_channel ? base_channel->topic : tpl->topic);
+    template_to_json_string(root, "description", base_channel ? base_channel->description : tpl->description);
+    template_to_json_string(root, "units", base_channel ? base_channel->units : tpl->units);
+    uint8_t decimals = base_channel ? base_channel->decimals : tpl->decimals;
+    if (decimals > 0) {
+        cJSON_AddNumberToObject(root, "decimals", decimals);
+    }
+    dm_sensor_parse_mode_t parse_mode = base_channel ? base_channel->parse_mode : tpl->parse_mode;
     cJSON_AddStringToObject(root, "value_type", "number");
-    cJSON_AddStringToObject(root, "parse_mode", sensor_parse_mode_to_string(tpl->parse_mode));
-    template_to_json_string(root, "json_key", tpl->json_key);
-    cJSON_AddBoolToObject(root, "display_monitor", tpl->display_monitor);
-    cJSON_AddBoolToObject(root, "history_enabled", tpl->history_enabled);
-    cJSON *warn = sensor_threshold_to_json(&tpl->warn);
+    cJSON_AddStringToObject(root, "parse_mode", sensor_parse_mode_to_string(parse_mode));
+    template_to_json_string(root, "json_key", base_channel ? base_channel->json_key : tpl->json_key);
+    cJSON_AddBoolToObject(root, "display_monitor", base_channel ? base_channel->display_monitor : tpl->display_monitor);
+    cJSON_AddBoolToObject(root, "history_enabled", base_channel ? base_channel->history_enabled : tpl->history_enabled);
+    const dm_sensor_threshold_t *warn_src = base_channel ? &base_channel->warn : &tpl->warn;
+    const dm_sensor_threshold_t *alarm_src = base_channel ? &base_channel->alarm : &tpl->alarm;
+    cJSON *warn = sensor_threshold_to_json(warn_src);
     if (warn) {
         cJSON_AddItemToObject(root, "warn", warn);
     }
-    cJSON *alarm = sensor_threshold_to_json(&tpl->alarm);
+    cJSON *alarm = sensor_threshold_to_json(alarm_src);
     if (alarm) {
         cJSON_AddItemToObject(root, "alarm", alarm);
+    }
+    if (tpl->channel_count > 0) {
+        cJSON *channel_arr = cJSON_AddArrayToObject(root, "channels");
+        if (!channel_arr) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        for (uint8_t i = 0; i < tpl->channel_count && i < DM_SENSOR_TEMPLATE_MAX_CHANNELS; ++i) {
+            const dm_sensor_channel_t *ch = &tpl->channels[i];
+            if (!ch->topic[0]) {
+                continue;
+            }
+            cJSON *ch_obj = cJSON_CreateObject();
+            if (!ch_obj) {
+                cJSON_Delete(root);
+                return NULL;
+            }
+            cJSON_AddItemToArray(channel_arr, ch_obj);
+            template_to_json_string(ch_obj, "id", ch->id);
+            template_to_json_string(ch_obj, "name", ch->name);
+            template_to_json_string(ch_obj, "description", ch->description);
+            template_to_json_string(ch_obj, "topic", ch->topic);
+            template_to_json_string(ch_obj, "units", ch->units);
+            if (ch->decimals > 0) {
+                cJSON_AddNumberToObject(ch_obj, "decimals", ch->decimals);
+            }
+            cJSON_AddStringToObject(ch_obj, "value_type", "number");
+            cJSON_AddStringToObject(ch_obj, "parse_mode", sensor_parse_mode_to_string(ch->parse_mode));
+            template_to_json_string(ch_obj, "json_key", ch->json_key);
+            cJSON_AddBoolToObject(ch_obj, "display_monitor", ch->display_monitor);
+            cJSON_AddBoolToObject(ch_obj, "history_enabled", ch->history_enabled);
+            cJSON *ch_warn = sensor_threshold_to_json(&ch->warn);
+            if (ch_warn) {
+                cJSON_AddItemToObject(ch_obj, "warn", ch_warn);
+            }
+            cJSON *ch_alarm = sensor_threshold_to_json(&ch->alarm);
+            if (ch_alarm) {
+                cJSON_AddItemToObject(ch_obj, "alarm", ch_alarm);
+            }
+        }
     }
     return root;
 }

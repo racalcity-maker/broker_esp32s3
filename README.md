@@ -8,7 +8,7 @@ Firmware for the “Broker” controller: an ESP32-S3 based automation hub that 
 
 - **Self-hosted MQTT broker** with QoS0/1, retain messages, last-will support, static ACL table, and a lightweight event bus bridge. Devices connect directly to the ESP32 over Wi-Fi.
 - **Web UI** (Status, Audio, Devices, Settings) served from the firmware. Includes a form-based "Simple editor" plus a wizard for creating devices/templates without touching JSON.
-- **Monitoring dashboard** that renders sensor templates (temperature, pressure, custom telemetry) with warn/alarm badges, history chips, and operator access without touching MQTT clients.
+- **Monitoring dashboard** that renders multi-channel sensor templates (temperature, pressure, custom telemetry) with per-channel warn/alarm badges, history chips, and operator access without touching MQTT clients.
 - **Device manager & templates** that live on PSRAM, while profiles and backups persist on SD card. Templates include UID validators, laser hold timers, MQTT/flag triggers, interval tasks, and the new sequence lock for ordered MQTT puzzles.
 - **Automation engine** capable of MQTT publish, audio play/stop, flag waits, loops, delays, and event bus steps. Multiple worker tasks prevent a single scenario from blocking the rest.
 - **Audio subsystem** (I2S) for track playback, pause/resume, loop, and synchronization with scenarios.
@@ -91,7 +91,7 @@ The manager keeps the active profile in PSRAM while writing snapshots to SD (`co
 | `if_condition` | Evaluate multiple flag requirements and run true/false scenario. | Logic mode (all/any), list of flag requirements, two scenario IDs. |
 | `interval_task` | Run a scenario on a fixed period. | Scenario ID, interval in ms, optional “run immediately”. |
 | `sequence_lock` | Enforce an ordered list of MQTT triggers. | Steps (topic + optional payload/hints), timeout/reset behavior, success/fail MQTT/audio/scenario outputs. |
-| `sensor_monitor` | Track MQTT telemetry, compare against warn/alarm thresholds, fire optional scenarios, and expose everything in the Monitoring tab. | Sensor name/topic, raw/JSON parse mode, units/decimals, warn/alarm thresholds with scenarios, monitor visibility, history toggle. |
+| `sensor_monitor` | Track MQTT telemetry, compare against warn/alarm thresholds, fire optional scenarios, and expose everything in the Monitoring tab. Each device can now publish **multiple channels** (temp, humidity, CO₂, etc.) without cloning the template. | Per-channel ID/name, topic (or inherited base topic), raw/JSON parse mode, JSON key, units/decimals, warn/alarm thresholds with hysteresis, min-duration, cooldown, scenario, monitor visibility, history toggle. |
 
 Documentation:
 

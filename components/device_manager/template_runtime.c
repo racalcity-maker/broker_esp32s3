@@ -109,8 +109,13 @@ static void restart_signal_timeout_timer(signal_runtime_entry_t *entry);
 static void stop_signal_timeout_timer(signal_runtime_entry_t *entry);
 static void reset_signal_entry(signal_runtime_entry_t *entry, const char *topic);
 static const char *sensor_status_str(dm_sensor_status_t status);
-static bool parse_sensor_value(const dm_sensor_template_t *cfg, const char *payload, float *out_value);
-static void trigger_sensor_threshold(sensor_runtime_entry_t *entry, dm_sensor_status_t status);
+static bool parse_sensor_value(const dm_sensor_channel_t *cfg, const char *payload, float *out_value);
+static void trigger_sensor_threshold(sensor_runtime_entry_t *entry,
+                                     const dm_sensor_channel_t *channel,
+                                     const dm_sensor_threshold_t *cfg,
+                                     dm_sensor_threshold_state_t *state,
+                                     dm_sensor_status_t status,
+                                     uint64_t now_ms);
 
 static bool payload_to_bool(const char *payload)
 {
@@ -614,7 +619,17 @@ static esp_err_t register_sequence_runtime(const dm_sequence_template_t *tpl, co
 
 static esp_err_t register_sensor_runtime(const dm_sensor_template_t *tpl, const char *device_id)
 {
-    if (!tpl || !tpl->topic[0]) {
+    if (!tpl || tpl->channel_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    bool topic_valid = false;
+    for (uint8_t i = 0; i < tpl->channel_count && i < DM_SENSOR_TEMPLATE_MAX_CHANNELS; ++i) {
+        if (tpl->channels[i].topic[0]) {
+            topic_valid = true;
+            break;
+        }
+    }
+    if (!topic_valid) {
         return ESP_ERR_INVALID_ARG;
     }
     sensor_runtime_entry_t *entry = runtime_alloc(sizeof(*entry));
@@ -626,10 +641,20 @@ static esp_err_t register_sensor_runtime(const dm_sensor_template_t *tpl, const 
     dm_sensor_runtime_init(&entry->runtime, tpl);
     entry->next = s_sensor_entries;
     s_sensor_entries = entry;
+    const char *first_topic = NULL;
+    if (tpl->channel_count > 0) {
+        for (uint8_t i = 0; i < tpl->channel_count && i < DM_SENSOR_TEMPLATE_MAX_CHANNELS; ++i) {
+            if (tpl->channels[i].topic[0]) {
+                first_topic = tpl->channels[i].topic;
+                break;
+            }
+        }
+    }
     ESP_LOGI(TAG,
-             "registered sensor runtime for %s topic=%s",
+             "registered sensor runtime for %s channels=%u topic=%s",
              entry->device_id,
-             entry->runtime.config.topic);
+             (unsigned)entry->runtime.channel_count,
+             first_topic ? first_topic : "<unset>");
     return ESP_OK;
 }
 
@@ -700,22 +725,31 @@ size_t dm_template_runtime_get_sensor_snapshots(dm_sensor_runtime_snapshot_t *ou
             dm_sensor_runtime_snapshot_t *snap = &out[written];
             memset(snap, 0, sizeof(*snap));
             dm_str_copy(snap->device_id, sizeof(snap->device_id), entry->device_id);
-            memcpy(&snap->config, &entry->runtime.config, sizeof(dm_sensor_template_t));
-            snap->has_value = entry->runtime.has_value;
-            snap->last_value = entry->runtime.last_value;
-            snap->status = entry->runtime.status;
-            snap->last_update_ms = entry->runtime.last_update_ms;
-            snap->history_count = entry->runtime.history_count;
-            if (snap->history_count > DM_SENSOR_HISTORY_MAX_SAMPLES) {
-                snap->history_count = DM_SENSOR_HISTORY_MAX_SAMPLES;
+            dm_str_copy(snap->device_name, sizeof(snap->device_name), entry->runtime.config.name);
+            dm_str_copy(snap->description, sizeof(snap->description), entry->runtime.config.description);
+            snap->channel_count = entry->runtime.channel_count;
+            if (snap->channel_count > DM_SENSOR_TEMPLATE_MAX_CHANNELS) {
+                snap->channel_count = DM_SENSOR_TEMPLATE_MAX_CHANNELS;
             }
-            if (snap->history_count > 0) {
-                uint8_t start = (entry->runtime.history_index + DM_SENSOR_HISTORY_MAX_SAMPLES -
-                                 snap->history_count) %
-                                DM_SENSOR_HISTORY_MAX_SAMPLES;
-                for (uint8_t i = 0; i < snap->history_count; ++i) {
-                    uint8_t idx = (uint8_t)((start + i) % DM_SENSOR_HISTORY_MAX_SAMPLES);
-                    snap->history[i] = entry->runtime.history[idx];
+            for (uint8_t c = 0; c < snap->channel_count; ++c) {
+                const dm_sensor_channel_runtime_t *src_ch = &entry->runtime.channels[c];
+                snap->channels[c].config = src_ch->config;
+                snap->channels[c].has_value = src_ch->has_value;
+                snap->channels[c].last_value = src_ch->last_value;
+                snap->channels[c].status = src_ch->status;
+                snap->channels[c].last_update_ms = src_ch->last_update_ms;
+                snap->channels[c].history_count = src_ch->history_count;
+                if (snap->channels[c].history_count > DM_SENSOR_HISTORY_MAX_SAMPLES) {
+                    snap->channels[c].history_count = DM_SENSOR_HISTORY_MAX_SAMPLES;
+                }
+                if (snap->channels[c].history_count > 0) {
+                    uint8_t start = (src_ch->history_index + DM_SENSOR_HISTORY_MAX_SAMPLES -
+                                     snap->channels[c].history_count) %
+                                    DM_SENSOR_HISTORY_MAX_SAMPLES;
+                    for (uint8_t i = 0; i < snap->channels[c].history_count; ++i) {
+                        uint8_t idx = (uint8_t)((start + i) % DM_SENSOR_HISTORY_MAX_SAMPLES);
+                        snap->channels[c].history[i] = src_ch->history[idx];
+                    }
                 }
             }
             written++;
@@ -1065,7 +1099,7 @@ static bool handle_sequence_message(const char *topic, const char *payload)
     return handled;
 }
 
-static bool parse_sensor_value(const dm_sensor_template_t *cfg, const char *payload, float *out_value)
+static bool parse_sensor_value(const dm_sensor_channel_t *cfg, const char *payload, float *out_value)
 {
     if (!cfg || !out_value || !payload || !payload[0]) {
         return false;
@@ -1100,26 +1134,30 @@ static bool parse_sensor_value(const dm_sensor_template_t *cfg, const char *payl
     }
 }
 
-static void trigger_sensor_threshold(sensor_runtime_entry_t *entry, dm_sensor_status_t status)
+static void trigger_sensor_threshold(sensor_runtime_entry_t *entry,
+                                     const dm_sensor_channel_t *channel,
+                                     const dm_sensor_threshold_t *cfg,
+                                     dm_sensor_threshold_state_t *state,
+                                     dm_sensor_status_t status,
+                                     uint64_t now_ms)
 {
-    if (!entry) {
+    if (!entry || !channel || !cfg || !cfg->enabled || !cfg->scenario[0] || !state) {
         return;
     }
-    const dm_sensor_threshold_t *th = NULL;
-    if (status == DM_SENSOR_STATUS_ALARM) {
-        th = &entry->runtime.config.alarm;
-    } else if (status == DM_SENSOR_STATUS_WARN) {
-        th = &entry->runtime.config.warn;
+    if (cfg->cooldown_ms > 0 && state->last_trigger_ms > 0) {
+        uint64_t next_allowed = state->last_trigger_ms + cfg->cooldown_ms;
+        if (now_ms < next_allowed) {
+            return;
+        }
     }
-    if (!th || !th->enabled || !th->scenario[0]) {
-        return;
-    }
+    state->last_trigger_ms = now_ms;
     ESP_LOGI(TAG,
-             "[Sensor] dev=%s trigger scenario=%s status=%s",
+             "[Sensor] dev=%s channel=%s trigger scenario=%s status=%s",
              entry->device_id,
-             th->scenario,
+             channel->name[0] ? channel->name : channel->topic,
+             cfg->scenario,
              sensor_status_str(status));
-    trigger_device_scenario(entry->device_id, th->scenario);
+    trigger_device_scenario(entry->device_id, cfg->scenario);
 }
 
 static bool handle_sensor_message(const char *topic, const char *payload)
@@ -1129,41 +1167,66 @@ static bool handle_sensor_message(const char *topic, const char *payload)
     }
     bool handled = false;
     const char *body = payload ? payload : "";
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
     for (sensor_runtime_entry_t *entry = s_sensor_entries; entry; entry = entry->next) {
-        const dm_sensor_template_t *cfg = &entry->runtime.config;
-        if (!cfg->topic[0] || strcmp(cfg->topic, topic) != 0) {
-            continue;
-        }
-        handled = true;
-        float value = 0.0f;
-        if (!parse_sensor_value(cfg, body, &value)) {
-            ESP_LOGW(TAG,
-                     "[Sensor] dev=%s parse failed topic=%s",
-                     entry->device_id,
-                     topic);
-            continue;
-        }
-        bool status_changed = false;
-        dm_sensor_status_t status;
-        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
-        dm_sensor_runtime_record(&entry->runtime, value, now_ms, &status, &status_changed);
-        if (status_changed || diagnostics_verbose_enabled()) {
-            ESP_LOGI(TAG,
-                     "[Sensor] dev=%s topic=%s value=%.3f status=%s",
-                     entry->device_id,
-                     topic,
-                     value,
-                     sensor_status_str(status));
-        } else {
-            ESP_LOGD(TAG,
-                     "[Sensor] dev=%s topic=%s value=%.3f status=%s",
-                     entry->device_id,
-                     topic,
-                     value,
-                     sensor_status_str(status));
-        }
-        if (status_changed) {
-            trigger_sensor_threshold(entry, status);
+        for (uint8_t i = 0; i < entry->runtime.channel_count; ++i) {
+            dm_sensor_channel_runtime_t *channel_rt = &entry->runtime.channels[i];
+            const dm_sensor_channel_t *cfg = &channel_rt->config;
+            if (!cfg->topic[0] || strcmp(cfg->topic, topic) != 0) {
+                continue;
+            }
+            handled = true;
+            float value = 0.0f;
+            if (!parse_sensor_value(cfg, body, &value)) {
+                ESP_LOGW(TAG,
+                         "[Sensor] dev=%s channel=%s parse failed topic=%s",
+                         entry->device_id,
+                         cfg->name[0] ? cfg->name : cfg->topic,
+                         topic);
+                continue;
+            }
+            bool status_changed = false;
+            bool warn_enter = false;
+            bool alarm_enter = false;
+            dm_sensor_status_t status;
+            dm_sensor_runtime_record(&entry->runtime,
+                                     i,
+                                     value,
+                                     now_ms,
+                                     &status,
+                                     &status_changed,
+                                     &warn_enter,
+                                     &alarm_enter);
+            if (status_changed || diagnostics_verbose_enabled()) {
+                ESP_LOGI(TAG,
+                         "[Sensor] dev=%s channel=%s value=%.3f status=%s",
+                         entry->device_id,
+                         cfg->name[0] ? cfg->name : cfg->topic,
+                         value,
+                         sensor_status_str(status));
+            } else {
+                ESP_LOGD(TAG,
+                         "[Sensor] dev=%s channel=%s value=%.3f status=%s",
+                         entry->device_id,
+                         cfg->name[0] ? cfg->name : cfg->topic,
+                         value,
+                         sensor_status_str(status));
+            }
+            if (alarm_enter) {
+                trigger_sensor_threshold(entry,
+                                         cfg,
+                                         &channel_rt->config.alarm,
+                                         &channel_rt->alarm_state,
+                                         DM_SENSOR_STATUS_ALARM,
+                                         now_ms);
+            } else if (warn_enter) {
+                trigger_sensor_threshold(entry,
+                                         cfg,
+                                         &channel_rt->config.warn,
+                                         &channel_rt->warn_state,
+                                         DM_SENSOR_STATUS_WARN,
+                                         now_ms);
+            }
         }
     }
     return handled;

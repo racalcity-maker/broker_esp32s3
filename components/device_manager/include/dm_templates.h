@@ -17,6 +17,7 @@ typedef enum {
 #define DM_UID_TEMPLATE_VALUE_MAX_LEN  32
 #define DM_SENSOR_UNITS_MAX_LEN        16
 #define DM_SENSOR_HISTORY_MAX_SAMPLES  16
+#define DM_SENSOR_TEMPLATE_MAX_CHANNELS 8
 
 typedef struct {
     char source_id[DEVICE_MANAGER_ID_MAX_LEN];
@@ -246,7 +247,26 @@ typedef struct {
     float threshold;
     dm_sensor_compare_t compare;
     char scenario[DEVICE_MANAGER_ID_MAX_LEN];
+    float hysteresis;
+    uint32_t min_duration_ms;
+    uint32_t cooldown_ms;
 } dm_sensor_threshold_t;
+
+typedef struct {
+    char id[DEVICE_MANAGER_ID_MAX_LEN];
+    char name[DEVICE_MANAGER_NAME_MAX_LEN];
+    char topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
+    char description[DEVICE_MANAGER_NAME_MAX_LEN];
+    char units[DM_SENSOR_UNITS_MAX_LEN];
+    uint8_t decimals;
+    dm_sensor_value_type_t value_type;
+    dm_sensor_parse_mode_t parse_mode;
+    char json_key[DEVICE_MANAGER_NAME_MAX_LEN];
+    bool display_monitor;
+    bool history_enabled;
+    dm_sensor_threshold_t warn;
+    dm_sensor_threshold_t alarm;
+} dm_sensor_channel_t;
 
 typedef struct {
     char name[DEVICE_MANAGER_NAME_MAX_LEN];
@@ -261,6 +281,8 @@ typedef struct {
     bool history_enabled;
     dm_sensor_threshold_t warn;
     dm_sensor_threshold_t alarm;
+    uint8_t channel_count;
+    dm_sensor_channel_t channels[DM_SENSOR_TEMPLATE_MAX_CHANNELS];
 } dm_sensor_template_t;
 
 void dm_sensor_template_clear(dm_sensor_template_t *tpl);

@@ -24,14 +24,21 @@ typedef struct {
 esp_err_t dm_template_runtime_get_uid_snapshot(const char *device_id, dm_uid_runtime_snapshot_t *out);
 
 typedef struct {
-    char device_id[DEVICE_MANAGER_ID_MAX_LEN];
-    dm_sensor_template_t config;
+    dm_sensor_channel_t config;
     bool has_value;
     float last_value;
     dm_sensor_status_t status;
     uint64_t last_update_ms;
     uint8_t history_count;
     dm_sensor_history_sample_t history[DM_SENSOR_HISTORY_MAX_SAMPLES];
+} dm_sensor_channel_runtime_snapshot_t;
+
+typedef struct {
+    char device_id[DEVICE_MANAGER_ID_MAX_LEN];
+    char device_name[DEVICE_MANAGER_NAME_MAX_LEN];
+    char description[DEVICE_MANAGER_NAME_MAX_LEN];
+    uint8_t channel_count;
+    dm_sensor_channel_runtime_snapshot_t channels[DM_SENSOR_TEMPLATE_MAX_CHANNELS];
 } dm_sensor_runtime_snapshot_t;
 
 size_t dm_template_runtime_get_sensor_snapshots(dm_sensor_runtime_snapshot_t *out, size_t max_count);
