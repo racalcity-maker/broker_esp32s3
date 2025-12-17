@@ -7,7 +7,8 @@ Firmware for the “Broker” controller: an ESP32-S3 based automation hub that 
 ## Feature Highlights
 
 - **Self-hosted MQTT broker** with QoS0/1, retain messages, last-will support, static ACL table, and a lightweight event bus bridge. Devices connect directly to the ESP32 over Wi-Fi.
-- **Web UI** (Status, Audio, Devices, Settings) served from the firmware. Includes a form-based “Simple editor” plus a wizard for creating devices/templates without touching JSON.
+- **Web UI** (Status, Audio, Devices, Settings) served from the firmware. Includes a form-based "Simple editor" plus a wizard for creating devices/templates without touching JSON.
+- **Monitoring dashboard** that renders sensor templates (temperature, pressure, custom telemetry) with warn/alarm badges, history chips, and operator access without touching MQTT clients.
 - **Device manager & templates** that live on PSRAM, while profiles and backups persist on SD card. Templates include UID validators, laser hold timers, MQTT/flag triggers, interval tasks, and the new sequence lock for ordered MQTT puzzles.
 - **Automation engine** capable of MQTT publish, audio play/stop, flag waits, loops, delays, and event bus steps. Multiple worker tasks prevent a single scenario from blocking the rest.
 - **Audio subsystem** (I2S) for track playback, pause/resume, loop, and synchronization with scenarios.
@@ -90,6 +91,7 @@ The manager keeps the active profile in PSRAM while writing snapshots to SD (`co
 | `if_condition` | Evaluate multiple flag requirements and run true/false scenario. | Logic mode (all/any), list of flag requirements, two scenario IDs. |
 | `interval_task` | Run a scenario on a fixed period. | Scenario ID, interval in ms, optional “run immediately”. |
 | `sequence_lock` | Enforce an ordered list of MQTT triggers. | Steps (topic + optional payload/hints), timeout/reset behavior, success/fail MQTT/audio/scenario outputs. |
+| `sensor_monitor` | Track MQTT telemetry, compare against warn/alarm thresholds, fire optional scenarios, and expose everything in the Monitoring tab. | Sensor name/topic, raw/JSON parse mode, units/decimals, warn/alarm thresholds with scenarios, monitor visibility, history toggle. |
 
 Documentation:
 
@@ -119,6 +121,7 @@ Automation workers pull jobs from a queue, allowing multiple devices to run in p
 ## Web UI Tour
 
 - **Status**: Wi-Fi state, MQTT server stats, SD health, **free DRAM/PSRAM headroom**, current flags, automation worker load. Provides form inputs for Wi-Fi/MQTT configuration.
+- **Monitoring**: Sensor cards fed by the `sensor_monitor` template show value/units, warn/alarm badges, threshold descriptions, and the last few samples so the operator can see how close they are to a trip point.
 - **Audio**: browse SD tracks, play/pause/stop manually, configure default volume, and test amplifier GPIO.
 - **Devices**: two editors:
   - *Simple editor* for direct JSON-backed editing (tabs, topics, scenarios, templates).
@@ -128,11 +131,8 @@ Automation workers pull jobs from a queue, allowing multiple devices to run in p
 
 ### Web UI Roles
 
-- **Admin** (default) sees все вкладки и может редактировать устройства, профили, MQTT/веб-настройки. Этой ролью вы авторизуетесь стандартными `admin/admin` или любыми новыми учётными данными.
-- **Operator/User** — облегчённый режим для полевых сценариев. Его можно включить на вкладке Settings → Operator account: задать отдельный логин/пароль и включить флажок `Enable operator`.
-  - После входа оператор попадает сразу во вкладку *Actions*, где показаны только карточки сценариев с компактными кнопками, масштабированными под телефоны.
-  - Остальные вкладки скрыты, так что оператор не сможет случайно изменить конфигурацию.
-  - Администратор может отключить оператора или поменять его пароль в любой момент; при отключении все активные сессии закрываются.
+- **Admin** (default) sees every tab (Status, Monitoring, Audio, Devices, Settings) plus all Wi-Fi/MQTT/device editors. Default credentials remain `admin/admin` until changed or reset through the hardware pin.
+- **Operator/User** accounts expose only the **Actions** and **Monitoring** tabs with compact controls that fit on phones. Operators can run scenarios while simultaneously watching sensor values, warn/alarm badges, and recent history, but they cannot edit device definitions. Admins can enable/disable the account from Settings → Operator account at any time, which also clears existing operator sessions.
 
 ### Web UI Authentication
 

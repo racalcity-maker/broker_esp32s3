@@ -11,6 +11,7 @@ typedef enum {
     DM_TEMPLATE_TYPE_IF_CONDITION,
     DM_TEMPLATE_TYPE_INTERVAL_TASK,
     DM_TEMPLATE_TYPE_SEQUENCE_LOCK,
+    DM_TEMPLATE_TYPE_SENSOR_MONITOR,
     DM_TEMPLATE_TYPE_COUNT,
 } dm_template_type_t;
 
@@ -31,6 +32,7 @@ typedef struct {
         dm_condition_template_t condition;
         dm_interval_task_template_t interval;
         dm_sequence_template_t sequence;
+        dm_sensor_template_t sensor;
     } data;
 } dm_template_config_t;
 

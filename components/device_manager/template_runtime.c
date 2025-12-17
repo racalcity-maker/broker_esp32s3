@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <strings.h>
+#include <stdlib.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -14,12 +15,14 @@
 #include "dm_runtime_condition.h"
 #include "dm_runtime_interval.h"
 #include "dm_runtime_sequence.h"
+#include "dm_runtime_sensor.h"
 #include "device_manager_utils.h"
 #include "audio_player.h"
 #include "automation_engine.h"
 #include "event_bus.h"
 #include "mqtt_core.h"
 #include "config_store.h"
+#include "cJSON.h"
 
 static const char *TAG = "template_runtime";
 
@@ -81,6 +84,12 @@ typedef struct sequence_runtime_entry {
     struct sequence_runtime_entry *next;
 } sequence_runtime_entry_t;
 
+typedef struct sensor_runtime_entry {
+    char device_id[DEVICE_MANAGER_ID_MAX_LEN];
+    dm_sensor_runtime_t runtime;
+    struct sensor_runtime_entry *next;
+} sensor_runtime_entry_t;
+
 static uid_runtime_entry_t *s_uid_entries;
 static signal_runtime_entry_t *s_signal_entries;
 static mqtt_runtime_entry_t *s_mqtt_entries;
@@ -88,6 +97,7 @@ static flag_runtime_entry_t *s_flag_entries;
 static condition_runtime_entry_t *s_condition_entries;
 static interval_runtime_entry_t *s_interval_entries;
 static sequence_runtime_entry_t *s_sequence_entries;
+static sensor_runtime_entry_t *s_sensor_entries;
 static bool s_event_handler_registered = false;
 
 static const char *signal_event_str(dm_signal_event_type_t ev);
@@ -98,6 +108,9 @@ static void signal_timeout_timer_cb(void *arg);
 static void restart_signal_timeout_timer(signal_runtime_entry_t *entry);
 static void stop_signal_timeout_timer(signal_runtime_entry_t *entry);
 static void reset_signal_entry(signal_runtime_entry_t *entry, const char *topic);
+static const char *sensor_status_str(dm_sensor_status_t status);
+static bool parse_sensor_value(const dm_sensor_template_t *cfg, const char *payload, float *out_value);
+static void trigger_sensor_threshold(sensor_runtime_entry_t *entry, dm_sensor_status_t status);
 
 static bool payload_to_bool(const char *payload)
 {
@@ -330,6 +343,17 @@ static void free_sequence_entries(void)
     s_sequence_entries = NULL;
 }
 
+static void free_sensor_entries(void)
+{
+    sensor_runtime_entry_t *entry = s_sensor_entries;
+    while (entry) {
+        sensor_runtime_entry_t *next = entry->next;
+        heap_caps_free(entry);
+        entry = next;
+    }
+    s_sensor_entries = NULL;
+}
+
 static const char *uid_event_str(dm_uid_event_type_t type)
 {
     switch (type) {
@@ -346,6 +370,21 @@ static const char *uid_event_str(dm_uid_event_type_t type)
     }
 }
 
+static const char *sensor_status_str(dm_sensor_status_t status)
+{
+    switch (status) {
+    case DM_SENSOR_STATUS_OK:
+        return "ok";
+    case DM_SENSOR_STATUS_WARN:
+        return "warn";
+    case DM_SENSOR_STATUS_ALARM:
+        return "alarm";
+    case DM_SENSOR_STATUS_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
 esp_err_t dm_template_runtime_init(void)
 {
     free_uid_entries();
@@ -355,6 +394,7 @@ esp_err_t dm_template_runtime_init(void)
     free_condition_entries();
     free_interval_entries();
     free_sequence_entries();
+    free_sensor_entries();
     if (!s_event_handler_registered) {
         esp_err_t err = event_bus_register_handler(template_event_handler);
         if (err != ESP_OK) {
@@ -572,6 +612,27 @@ static esp_err_t register_sequence_runtime(const dm_sequence_template_t *tpl, co
     return ESP_OK;
 }
 
+static esp_err_t register_sensor_runtime(const dm_sensor_template_t *tpl, const char *device_id)
+{
+    if (!tpl || !tpl->topic[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sensor_runtime_entry_t *entry = runtime_alloc(sizeof(*entry));
+    if (!entry) {
+        ESP_LOGE(TAG, "no memory for sensor runtime");
+        return ESP_ERR_NO_MEM;
+    }
+    dm_str_copy(entry->device_id, sizeof(entry->device_id), device_id);
+    dm_sensor_runtime_init(&entry->runtime, tpl);
+    entry->next = s_sensor_entries;
+    s_sensor_entries = entry;
+    ESP_LOGI(TAG,
+             "registered sensor runtime for %s topic=%s",
+             entry->device_id,
+             entry->runtime.config.topic);
+    return ESP_OK;
+}
+
 esp_err_t dm_template_runtime_register(const dm_template_config_t *tpl, const char *device_id)
 {
     if (!tpl || !device_id) {
@@ -592,6 +653,8 @@ esp_err_t dm_template_runtime_register(const dm_template_config_t *tpl, const ch
         return register_interval_runtime(&tpl->data.interval, device_id);
     case DM_TEMPLATE_TYPE_SEQUENCE_LOCK:
         return register_sequence_runtime(&tpl->data.sequence, device_id);
+    case DM_TEMPLATE_TYPE_SENSOR_MONITOR:
+        return register_sensor_runtime(&tpl->data.sensor, device_id);
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -625,6 +688,41 @@ esp_err_t dm_template_runtime_get_uid_snapshot(const char *device_id, dm_uid_run
         return ESP_OK;
     }
     return ESP_ERR_NOT_FOUND;
+}
+
+size_t dm_template_runtime_get_sensor_snapshots(dm_sensor_runtime_snapshot_t *out, size_t max_count)
+{
+    size_t written = 0;
+    size_t total = 0;
+    size_t limit = (out && max_count > 0) ? max_count : 0;
+    for (sensor_runtime_entry_t *entry = s_sensor_entries; entry; entry = entry->next) {
+        if (out && written < limit) {
+            dm_sensor_runtime_snapshot_t *snap = &out[written];
+            memset(snap, 0, sizeof(*snap));
+            dm_str_copy(snap->device_id, sizeof(snap->device_id), entry->device_id);
+            memcpy(&snap->config, &entry->runtime.config, sizeof(dm_sensor_template_t));
+            snap->has_value = entry->runtime.has_value;
+            snap->last_value = entry->runtime.last_value;
+            snap->status = entry->runtime.status;
+            snap->last_update_ms = entry->runtime.last_update_ms;
+            snap->history_count = entry->runtime.history_count;
+            if (snap->history_count > DM_SENSOR_HISTORY_MAX_SAMPLES) {
+                snap->history_count = DM_SENSOR_HISTORY_MAX_SAMPLES;
+            }
+            if (snap->history_count > 0) {
+                uint8_t start = (entry->runtime.history_index + DM_SENSOR_HISTORY_MAX_SAMPLES -
+                                 snap->history_count) %
+                                DM_SENSOR_HISTORY_MAX_SAMPLES;
+                for (uint8_t i = 0; i < snap->history_count; ++i) {
+                    uint8_t idx = (uint8_t)((start + i) % DM_SENSOR_HISTORY_MAX_SAMPLES);
+                    snap->history[i] = entry->runtime.history[idx];
+                }
+            }
+            written++;
+        }
+        total++;
+    }
+    return (out && limit > 0) ? written : total;
 }
 
 static void publish_mqtt_payload(const char *topic, const char *payload)
@@ -967,6 +1065,109 @@ static bool handle_sequence_message(const char *topic, const char *payload)
     return handled;
 }
 
+static bool parse_sensor_value(const dm_sensor_template_t *cfg, const char *payload, float *out_value)
+{
+    if (!cfg || !out_value || !payload || !payload[0]) {
+        return false;
+    }
+    switch (cfg->parse_mode) {
+    case DM_SENSOR_PARSE_JSON_NUMBER: {
+        if (!cfg->json_key[0]) {
+            return false;
+        }
+        cJSON *root = cJSON_Parse(payload);
+        if (!root) {
+            return false;
+        }
+        const cJSON *item = cJSON_GetObjectItem(root, cfg->json_key);
+        bool ok = cJSON_IsNumber(item);
+        if (ok) {
+            *out_value = (float)item->valuedouble;
+        }
+        cJSON_Delete(root);
+        return ok;
+    }
+    case DM_SENSOR_PARSE_RAW_NUMBER:
+    default: {
+        char *endptr = NULL;
+        float val = strtof(payload, &endptr);
+        if (endptr == payload) {
+            return false;
+        }
+        *out_value = val;
+        return true;
+    }
+    }
+}
+
+static void trigger_sensor_threshold(sensor_runtime_entry_t *entry, dm_sensor_status_t status)
+{
+    if (!entry) {
+        return;
+    }
+    const dm_sensor_threshold_t *th = NULL;
+    if (status == DM_SENSOR_STATUS_ALARM) {
+        th = &entry->runtime.config.alarm;
+    } else if (status == DM_SENSOR_STATUS_WARN) {
+        th = &entry->runtime.config.warn;
+    }
+    if (!th || !th->enabled || !th->scenario[0]) {
+        return;
+    }
+    ESP_LOGI(TAG,
+             "[Sensor] dev=%s trigger scenario=%s status=%s",
+             entry->device_id,
+             th->scenario,
+             sensor_status_str(status));
+    trigger_device_scenario(entry->device_id, th->scenario);
+}
+
+static bool handle_sensor_message(const char *topic, const char *payload)
+{
+    if (!topic || !topic[0]) {
+        return false;
+    }
+    bool handled = false;
+    const char *body = payload ? payload : "";
+    for (sensor_runtime_entry_t *entry = s_sensor_entries; entry; entry = entry->next) {
+        const dm_sensor_template_t *cfg = &entry->runtime.config;
+        if (!cfg->topic[0] || strcmp(cfg->topic, topic) != 0) {
+            continue;
+        }
+        handled = true;
+        float value = 0.0f;
+        if (!parse_sensor_value(cfg, body, &value)) {
+            ESP_LOGW(TAG,
+                     "[Sensor] dev=%s parse failed topic=%s",
+                     entry->device_id,
+                     topic);
+            continue;
+        }
+        bool status_changed = false;
+        dm_sensor_status_t status;
+        uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        dm_sensor_runtime_record(&entry->runtime, value, now_ms, &status, &status_changed);
+        if (status_changed || diagnostics_verbose_enabled()) {
+            ESP_LOGI(TAG,
+                     "[Sensor] dev=%s topic=%s value=%.3f status=%s",
+                     entry->device_id,
+                     topic,
+                     value,
+                     sensor_status_str(status));
+        } else {
+            ESP_LOGD(TAG,
+                     "[Sensor] dev=%s topic=%s value=%.3f status=%s",
+                     entry->device_id,
+                     topic,
+                     value,
+                     sensor_status_str(status));
+        }
+        if (status_changed) {
+            trigger_sensor_threshold(entry, status);
+        }
+    }
+    return handled;
+}
 static bool handle_signal_message(const char *topic, const char *payload)
 {
     bool handled = false;
@@ -1043,6 +1244,7 @@ bool dm_template_runtime_handle_mqtt(const char *topic, const char *payload)
     handled |= handle_uid_message(topic, payload);
     handled |= handle_signal_message(topic, payload);
     handled |= handle_mqtt_trigger_message(topic, payload);
+    handled |= handle_sensor_message(topic, payload);
     handled |= handle_sequence_message(topic, payload);
     return handled;
 }

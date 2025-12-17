@@ -4,6 +4,7 @@
 #include "esp_err.h"
 
 #include "dm_template_registry.h"
+#include "dm_runtime_sensor.h"
 
 esp_err_t dm_template_runtime_init(void);
 void dm_template_runtime_reset(void);
@@ -21,3 +22,16 @@ typedef struct {
     } slots[DM_UID_TEMPLATE_MAX_SLOTS];
 } dm_uid_runtime_snapshot_t;
 esp_err_t dm_template_runtime_get_uid_snapshot(const char *device_id, dm_uid_runtime_snapshot_t *out);
+
+typedef struct {
+    char device_id[DEVICE_MANAGER_ID_MAX_LEN];
+    dm_sensor_template_t config;
+    bool has_value;
+    float last_value;
+    dm_sensor_status_t status;
+    uint64_t last_update_ms;
+    uint8_t history_count;
+    dm_sensor_history_sample_t history[DM_SENSOR_HISTORY_MAX_SAMPLES];
+} dm_sensor_runtime_snapshot_t;
+
+size_t dm_template_runtime_get_sensor_snapshots(dm_sensor_runtime_snapshot_t *out, size_t max_count);

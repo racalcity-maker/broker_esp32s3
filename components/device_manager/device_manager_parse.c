@@ -48,6 +48,118 @@ static bool json_get_bool_default(const cJSON *item, bool default_val)
     return default_val;
 }
 
+static bool sensor_parse_mode_from_string(const char *name, dm_sensor_parse_mode_t *out)
+{
+    if (!name || !out) {
+        return false;
+    }
+    if (strcasecmp(name, "json") == 0 || strcasecmp(name, "json_number") == 0) {
+        *out = DM_SENSOR_PARSE_JSON_NUMBER;
+        return true;
+    }
+    if (strcasecmp(name, "raw") == 0 || strcasecmp(name, "raw_number") == 0) {
+        *out = DM_SENSOR_PARSE_RAW_NUMBER;
+        return true;
+    }
+    return false;
+}
+
+static bool sensor_compare_from_string(const char *name, dm_sensor_compare_t *out)
+{
+    if (!name || !out) {
+        return false;
+    }
+    if (strcasecmp(name, "below_or_equal") == 0 || strcasecmp(name, "lte") == 0) {
+        *out = DM_SENSOR_COMPARE_BELOW_OR_EQUAL;
+        return true;
+    }
+    if (strcasecmp(name, "above_or_equal") == 0 || strcasecmp(name, "gte") == 0) {
+        *out = DM_SENSOR_COMPARE_ABOVE_OR_EQUAL;
+        return true;
+    }
+    return false;
+}
+
+static void sensor_threshold_from_json(dm_sensor_threshold_t *dst, const cJSON *obj)
+{
+    if (!dst || !cJSON_IsObject(obj)) {
+        return;
+    }
+    const cJSON *enabled = cJSON_GetObjectItem(obj, "enabled");
+    bool enabled_explicit = cJSON_IsBool(enabled);
+    if (enabled_explicit) {
+        dst->enabled = cJSON_IsTrue(enabled);
+    }
+    const cJSON *value = cJSON_GetObjectItem(obj, "value");
+    if (cJSON_IsNumber(value)) {
+        dst->threshold = (float)value->valuedouble;
+    }
+    const cJSON *cmp = cJSON_GetObjectItem(obj, "compare");
+    if (cJSON_IsString(cmp) && cmp->valuestring) {
+        sensor_compare_from_string(cmp->valuestring, &dst->compare);
+    }
+    const cJSON *scenario = cJSON_GetObjectItem(obj, "scenario");
+    if (cJSON_IsString(scenario) && scenario->valuestring) {
+        dm_str_copy(dst->scenario, sizeof(dst->scenario), scenario->valuestring);
+    }
+    if (!enabled_explicit && (cJSON_IsNumber(value) || (cJSON_IsString(scenario) && scenario->valuestring))) {
+        dst->enabled = true;
+    }
+}
+
+static bool sensor_template_from_json(dm_sensor_template_t *tpl, const cJSON *obj)
+{
+    if (!tpl || !obj) {
+        return false;
+    }
+    dm_sensor_template_clear(tpl);
+    const cJSON *topic = cJSON_GetObjectItem(obj, "topic");
+    if (!cJSON_IsString(topic) || !topic->valuestring || !topic->valuestring[0]) {
+        return false;
+    }
+    dm_str_copy(tpl->topic, sizeof(tpl->topic), topic->valuestring);
+    const cJSON *name = cJSON_GetObjectItem(obj, "name");
+    if (cJSON_IsString(name) && name->valuestring) {
+        dm_str_copy(tpl->name, sizeof(tpl->name), name->valuestring);
+    }
+    const cJSON *desc = cJSON_GetObjectItem(obj, "description");
+    if (cJSON_IsString(desc) && desc->valuestring) {
+        dm_str_copy(tpl->description, sizeof(tpl->description), desc->valuestring);
+    }
+    const cJSON *units = cJSON_GetObjectItem(obj, "units");
+    if (cJSON_IsString(units) && units->valuestring) {
+        dm_str_copy(tpl->units, sizeof(tpl->units), units->valuestring);
+    }
+    const cJSON *decimals = cJSON_GetObjectItem(obj, "decimals");
+    if (cJSON_IsNumber(decimals)) {
+        int d = (int)decimals->valuedouble;
+        if (d < 0) {
+            d = 0;
+        } else if (d > 6) {
+            d = 6;
+        }
+        tpl->decimals = (uint8_t)d;
+    }
+    const cJSON *parse_mode = cJSON_GetObjectItem(obj, "parse_mode");
+    if (cJSON_IsString(parse_mode) && parse_mode->valuestring) {
+        sensor_parse_mode_from_string(parse_mode->valuestring, &tpl->parse_mode);
+    }
+    const cJSON *json_key = cJSON_GetObjectItem(obj, "json_key");
+    if (cJSON_IsString(json_key) && json_key->valuestring) {
+        dm_str_copy(tpl->json_key, sizeof(tpl->json_key), json_key->valuestring);
+    }
+    tpl->display_monitor =
+        json_get_bool_default(cJSON_GetObjectItem(obj, "display_monitor"), tpl->display_monitor);
+    tpl->history_enabled =
+        json_get_bool_default(cJSON_GetObjectItem(obj, "history_enabled"), tpl->history_enabled);
+    sensor_threshold_from_json(&tpl->warn, cJSON_GetObjectItem(obj, "warn"));
+    sensor_threshold_from_json(&tpl->alarm, cJSON_GetObjectItem(obj, "alarm"));
+    if (tpl->parse_mode == DM_SENSOR_PARSE_JSON_NUMBER && !tpl->json_key[0]) {
+        return false;
+    }
+    return tpl->topic[0] != 0;
+}
+
 // Parse UID validator configuration from JSON into struct.
 static bool uid_template_from_json(dm_uid_template_t *tpl, const cJSON *obj)
 {
@@ -481,6 +593,11 @@ static bool template_from_json(device_descriptor_t *dev, const cJSON *obj)
     case DM_TEMPLATE_TYPE_SEQUENCE_LOCK: {
         const cJSON *sequence_obj = cJSON_GetObjectItem(obj, "sequence");
         ok = sequence_template_from_json(&dev->template_config.data.sequence, sequence_obj);
+        break;
+    }
+    case DM_TEMPLATE_TYPE_SENSOR_MONITOR: {
+        const cJSON *sensor_obj = cJSON_GetObjectItem(obj, "sensor");
+        ok = sensor_template_from_json(&dev->template_config.data.sensor, sensor_obj);
         break;
     }
     default:

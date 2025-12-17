@@ -45,6 +45,12 @@ static const dm_template_descriptor_t s_templates[] = {
         .label = "Sequence Lock",
         .description = "Validates an ordered list of MQTT triggers with optional hints.",
     },
+    {
+        .type = DM_TEMPLATE_TYPE_SENSOR_MONITOR,
+        .id = "sensor_monitor",
+        .label = "Sensor Monitor",
+        .description = "Tracks MQTT sensor telemetry, thresholds, and optional alert scenarios.",
+    },
 };
 
 const dm_template_descriptor_t *dm_template_registry_get_all(size_t *count)

@@ -94,6 +94,7 @@ static esp_err_t web_http_check(esp_err_t err, const char *context)
 
 static esp_err_t devices_templates_handler(httpd_req_t *req);
 static char *build_uid_monitor_json(void);
+static char *build_sensor_monitor_json(void);
 static char *build_mqtt_users_json(const app_mqtt_config_t *mqtt_cfg);
 static esp_err_t mqtt_users_handler(httpd_req_t *req);
 static bool web_ui_require_session(httpd_req_t *req, bool redirect_on_fail, web_user_role_t *role_out);
@@ -115,6 +116,50 @@ static char *dup_empty_json_array(void)
     }
     memcpy(buf, "[]", 3);
     return buf;
+}
+
+static const char *sensor_status_to_string(dm_sensor_status_t status)
+{
+    switch (status) {
+    case DM_SENSOR_STATUS_OK:
+        return "ok";
+    case DM_SENSOR_STATUS_WARN:
+        return "warn";
+    case DM_SENSOR_STATUS_ALARM:
+        return "alarm";
+    case DM_SENSOR_STATUS_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
+static const char *sensor_compare_to_string(dm_sensor_compare_t cmp)
+{
+    switch (cmp) {
+    case DM_SENSOR_COMPARE_BELOW_OR_EQUAL:
+        return "below_or_equal";
+    case DM_SENSOR_COMPARE_ABOVE_OR_EQUAL:
+    default:
+        return "above_or_equal";
+    }
+}
+
+static cJSON *sensor_threshold_json(const dm_sensor_threshold_t *th)
+{
+    if (!th || !th->enabled) {
+        return NULL;
+    }
+    cJSON *obj = cJSON_CreateObject();
+    if (!obj) {
+        return NULL;
+    }
+    cJSON_AddBoolToObject(obj, "enabled", true);
+    cJSON_AddNumberToObject(obj, "value", (double)th->threshold);
+    cJSON_AddStringToObject(obj, "compare", sensor_compare_to_string(th->compare));
+    if (th->scenario[0]) {
+        cJSON_AddStringToObject(obj, "scenario", th->scenario);
+    }
+    return obj;
 }
 
 static char *build_uid_monitor_json(void)
@@ -183,6 +228,79 @@ static char *build_uid_monitor_json(void)
     char *printed = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     device_manager_unlock_config();
+    if (!printed) {
+        return dup_empty_json_array();
+    }
+    return printed;
+}
+
+static char *build_sensor_monitor_json(void)
+{
+    dm_sensor_runtime_snapshot_t snapshots[DEVICE_MANAGER_MAX_DEVICES];
+    size_t count = dm_template_runtime_get_sensor_snapshots(
+        snapshots, DEVICE_MANAGER_MAX_DEVICES);
+    cJSON *root = cJSON_CreateArray();
+    if (!root) {
+        return dup_empty_json_array();
+    }
+    for (size_t i = 0; i < count && i < DEVICE_MANAGER_MAX_DEVICES; ++i) {
+        const dm_sensor_runtime_snapshot_t *snap = &snapshots[i];
+        cJSON *obj = cJSON_CreateObject();
+        if (!obj) {
+            cJSON_Delete(root);
+            return dup_empty_json_array();
+        }
+        cJSON_AddStringToObject(obj, "device", snap->device_id);
+        const char *name = snap->config.name[0] ? snap->config.name : snap->device_id;
+        cJSON_AddStringToObject(obj, "name", name);
+        cJSON_AddStringToObject(obj, "topic", snap->config.topic);
+        if (snap->config.description[0]) {
+            cJSON_AddStringToObject(obj, "description", snap->config.description);
+        }
+        if (snap->config.units[0]) {
+            cJSON_AddStringToObject(obj, "units", snap->config.units);
+        }
+        cJSON_AddNumberToObject(obj, "decimals", snap->config.decimals);
+        cJSON_AddBoolToObject(obj, "display", snap->config.display_monitor);
+        cJSON_AddBoolToObject(obj, "history_enabled", snap->config.history_enabled);
+        cJSON_AddStringToObject(obj, "status", sensor_status_to_string(snap->status));
+        if (snap->has_value) {
+            cJSON_AddNumberToObject(obj, "value", (double)snap->last_value);
+            cJSON_AddNumberToObject(obj, "updated_ms", (double)snap->last_update_ms);
+        }
+        cJSON *warn = sensor_threshold_json(&snap->config.warn);
+        if (warn) {
+            cJSON_AddItemToObject(obj, "warn", warn);
+        }
+        cJSON *alarm = sensor_threshold_json(&snap->config.alarm);
+        if (alarm) {
+            cJSON_AddItemToObject(obj, "alarm", alarm);
+        }
+        if (snap->history_count > 0 && snap->config.history_enabled) {
+            cJSON *hist = cJSON_AddArrayToObject(obj, "history");
+            if (!hist) {
+                cJSON_Delete(obj);
+                cJSON_Delete(root);
+                return dup_empty_json_array();
+            }
+            for (uint8_t h = 0; h < snap->history_count && h < DM_SENSOR_HISTORY_MAX_SAMPLES; ++h) {
+                const dm_sensor_history_sample_t *sample = &snap->history[h];
+                cJSON *entry = cJSON_CreateObject();
+                if (!entry) {
+                    cJSON_Delete(obj);
+                    cJSON_Delete(root);
+                    return dup_empty_json_array();
+                }
+                cJSON_AddItemToArray(hist, entry);
+                cJSON_AddNumberToObject(entry, "value", (double)sample->value);
+                cJSON_AddStringToObject(entry, "status", sensor_status_to_string(sample->status));
+                cJSON_AddNumberToObject(entry, "timestamp_ms", (double)sample->timestamp_ms);
+            }
+        }
+        cJSON_AddItemToArray(root, obj);
+    }
+    char *printed = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
     if (!printed) {
         return dup_empty_json_array();
     }
@@ -848,6 +966,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         snprintf(ip_buf, sizeof(ip_buf), IPSTR, IP2STR(&ip.ip));
     }
     char *uid_json = build_uid_monitor_json();
+    char *sensor_json = build_sensor_monitor_json();
     char *mqtt_users_json = build_mqtt_users_json(&cfg->mqtt);
     const char *fmt =
         "{\"wifi\":{\"ssid\":\"%s\",\"host\":\"%s\",\"sta_ip\":\"%s\",\"ap\":%s},"
@@ -859,7 +978,8 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"diag\":{\"verbose_logging\":%s},"
         "\"mem\":{\"dram\":{\"free_kb\":%u,\"total_kb\":%u},\"psram\":{\"free_kb\":%u,\"total_kb\":%u}},"
         "\"clients\":{\"total\":%u},"
-        "\"uid_monitor\":%s}";
+        "\"uid_monitor\":%s,"
+        "\"sensors\":%s}";
     mqtt_client_stats_t stats;
     mqtt_core_get_client_stats(&stats);
     audio_player_status_t a_status;
@@ -898,7 +1018,8 @@ static esp_err_t status_handler(httpd_req_t *req)
                           psram_free_kb,
                           psram_total_kb,
                           stats.total,
-                          uid_json ? uid_json : "[]");
+                          uid_json ? uid_json : "[]",
+                          sensor_json ? sensor_json : "[]");
     if (needed < 0) {
         if (uid_json) {
             free(uid_json);
@@ -946,12 +1067,16 @@ static esp_err_t status_handler(httpd_req_t *req)
               dram_total_kb,
               psram_free_kb,
               psram_total_kb,
-              stats.total,
-              uid_json ? uid_json : "[]");
+             stats.total,
+             uid_json ? uid_json : "[]",
+             sensor_json ? sensor_json : "[]");
     esp_err_t res = web_ui_send_ok(req, "application/json", buf);
     heap_caps_free(buf);
     if (uid_json) {
         free(uid_json);
+    }
+    if (sensor_json) {
+        free(sensor_json);
     }
     if (mqtt_users_json) {
         free(mqtt_users_json);

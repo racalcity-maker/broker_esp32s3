@@ -287,3 +287,17 @@ void dm_sequence_template_clear(dm_sequence_template_t *tpl)
     memset(tpl, 0, sizeof(*tpl));
     tpl->reset_on_error = true;
 }
+
+void dm_sensor_template_clear(dm_sensor_template_t *tpl)
+{
+    if (!tpl) {
+        return;
+    }
+    memset(tpl, 0, sizeof(*tpl));
+    tpl->value_type = DM_SENSOR_VALUE_NUMBER;
+    tpl->parse_mode = DM_SENSOR_PARSE_RAW_NUMBER;
+    tpl->display_monitor = true;
+    tpl->history_enabled = true;
+    tpl->warn.compare = DM_SENSOR_COMPARE_ABOVE_OR_EQUAL;
+    tpl->alarm.compare = DM_SENSOR_COMPARE_ABOVE_OR_EQUAL;
+}

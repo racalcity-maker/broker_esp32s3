@@ -19,6 +19,44 @@ static void template_to_json_string(cJSON *obj, const char *key, const char *val
     }
 }
 
+static const char *sensor_parse_mode_to_string(dm_sensor_parse_mode_t mode)
+{
+    switch (mode) {
+    case DM_SENSOR_PARSE_JSON_NUMBER:
+        return "json_number";
+    case DM_SENSOR_PARSE_RAW_NUMBER:
+    default:
+        return "raw_number";
+    }
+}
+
+static const char *sensor_compare_to_string(dm_sensor_compare_t cmp)
+{
+    switch (cmp) {
+    case DM_SENSOR_COMPARE_BELOW_OR_EQUAL:
+        return "below_or_equal";
+    case DM_SENSOR_COMPARE_ABOVE_OR_EQUAL:
+    default:
+        return "above_or_equal";
+    }
+}
+
+static cJSON *sensor_threshold_to_json(const dm_sensor_threshold_t *th)
+{
+    if (!th || !th->enabled) {
+        return NULL;
+    }
+    cJSON *obj = cJSON_CreateObject();
+    if (!obj) {
+        return NULL;
+    }
+    cJSON_AddBoolToObject(obj, "enabled", true);
+    cJSON_AddNumberToObject(obj, "value", (double)th->threshold);
+    cJSON_AddStringToObject(obj, "compare", sensor_compare_to_string(th->compare));
+    template_to_json_string(obj, "scenario", th->scenario);
+    return obj;
+}
+
 // Serialize scenario step into JSON representation.
 static cJSON *step_to_json(const device_action_step_t *step)
 {
@@ -372,6 +410,38 @@ static cJSON *sequence_template_to_json(const dm_sequence_template_t *tpl)
     return root;
 }
 
+static cJSON *sensor_template_to_json(const dm_sensor_template_t *tpl)
+{
+    if (!tpl) {
+        return NULL;
+    }
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        return NULL;
+    }
+    template_to_json_string(root, "name", tpl->name);
+    template_to_json_string(root, "topic", tpl->topic);
+    template_to_json_string(root, "description", tpl->description);
+    template_to_json_string(root, "units", tpl->units);
+    if (tpl->decimals > 0) {
+        cJSON_AddNumberToObject(root, "decimals", tpl->decimals);
+    }
+    cJSON_AddStringToObject(root, "value_type", "number");
+    cJSON_AddStringToObject(root, "parse_mode", sensor_parse_mode_to_string(tpl->parse_mode));
+    template_to_json_string(root, "json_key", tpl->json_key);
+    cJSON_AddBoolToObject(root, "display_monitor", tpl->display_monitor);
+    cJSON_AddBoolToObject(root, "history_enabled", tpl->history_enabled);
+    cJSON *warn = sensor_threshold_to_json(&tpl->warn);
+    if (warn) {
+        cJSON_AddItemToObject(root, "warn", warn);
+    }
+    cJSON *alarm = sensor_threshold_to_json(&tpl->alarm);
+    if (alarm) {
+        cJSON_AddItemToObject(root, "alarm", alarm);
+    }
+    return root;
+}
+
 // Attach template-specific structure into device JSON.
 static cJSON *template_to_json(const device_descriptor_t *dev)
 {
@@ -426,6 +496,12 @@ static cJSON *template_to_json(const device_descriptor_t *dev)
         data = sequence_template_to_json(&dev->template_config.data.sequence);
         if (data) {
             cJSON_AddItemToObject(root, "sequence", data);
+        }
+        break;
+    case DM_TEMPLATE_TYPE_SENSOR_MONITOR:
+        data = sensor_template_to_json(&dev->template_config.data.sensor);
+        if (data) {
+            cJSON_AddItemToObject(root, "sensor", data);
         }
         break;
     default:
