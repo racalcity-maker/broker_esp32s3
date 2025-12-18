@@ -11,10 +11,12 @@ const TEMPLATE_TYPES = [
   {value: 'if_condition', label: 'Conditional scenario'},
   {value: 'interval_task', label: 'Interval task'},
   {value: 'sequence_lock', label: 'Sequence lock'},
+  {value: 'sensor_monitor', label: 'Sensor monitor'},
 ];
 const MQTT_RULE_LIMIT = 8;
 const FLAG_RULE_LIMIT = 8;
 const SEQUENCE_STEP_LIMIT = 8;
+const SENSOR_CHANNEL_LIMIT = 8;
 const WIZARD_TEMPLATES = {
   blank_device: {
     label: 'Blank Device',
@@ -27,6 +29,72 @@ const WIZARD_TEMPLATES = {
       base.scenarios = [];
       base.topics = [];
       return base;
+    },
+  },
+  sensor_monitor: {
+    label: 'Sensor Monitor',
+    description: 'Render Monitoring cards fed by MQTT telemetry with warn/alarm thresholds.',
+    defaults: {
+      deviceName: 'Sensor monitor',
+      baseTopic: 'sensors/',
+      channelTopic: 'sensors/temperature',
+      channelId: 'temperature',
+      channelName: 'Temperature',
+      channelUnits: '°C',
+      channelParseMode: 'raw_number',
+      channelJsonKey: '',
+    },
+    fields: [
+      {name: 'baseTopic', label: 'Default topic/prefix', placeholder: 'sensors/'},
+      {name: 'channelTopic', label: 'Channel topic', placeholder: 'sensors/temperature'},
+      {name: 'channelId', label: 'Channel ID', placeholder: 'temperature'},
+      {name: 'channelName', label: 'Channel name', placeholder: 'Temperature'},
+      {name: 'channelUnits', label: 'Units', placeholder: '°C'},
+      {name: 'channelParseMode', label: 'Parse mode (raw_number/json_number)', placeholder: 'raw_number'},
+      {name: 'channelJsonKey', label: 'JSON key (for json mode)', placeholder: 'value'},
+    ],
+    build(base, data) {
+      const device = base;
+      const tpl = defaultSensorTemplate();
+      const baseTopic = (data.baseTopic || 'sensors/').trim() || 'sensors/';
+      tpl.topic = baseTopic;
+      const parseMode = data.channelParseMode === 'json_number' ? 'json_number' : 'raw_number';
+      tpl.parse_mode = parseMode;
+      tpl.display_monitor = true;
+      tpl.history_enabled = true;
+      if (parseMode === 'json_number') {
+        tpl.json_key = (data.channelJsonKey || 'value').trim();
+      } else {
+        tpl.json_key = (data.channelJsonKey || '').trim();
+      }
+      const channel = defaultSensorChannel();
+      channel.id = slugify(data.channelId || data.channelName || 'sensor_channel');
+      channel.name = (data.channelName || 'Sensor').trim();
+      tpl.name = channel.name;
+      tpl.units = (data.channelUnits || '').trim();
+      channel.units = tpl.units;
+      channel.parse_mode = parseMode;
+      channel.json_key = parseMode === 'json_number'
+        ? (data.channelJsonKey || 'value').trim()
+        : (data.channelJsonKey || '').trim();
+      channel.display_monitor = true;
+      channel.history_enabled = true;
+      let channelTopic = (data.channelTopic || '').trim();
+      if (!channelTopic) {
+        const suffix = channel.id || 'sensor';
+        if (baseTopic.endsWith('/')) {
+          channelTopic = `${baseTopic}${suffix}`;
+        } else {
+          channelTopic = `${baseTopic}/${suffix}`;
+        }
+      }
+      channel.topic = channelTopic;
+      tpl.channels = [channel];
+      device.template = {
+        type: 'sensor_monitor',
+        sensor: tpl,
+      };
+      return device;
     },
   },
 };
@@ -270,6 +338,8 @@ function handleDetailClick(ev) {
     case 'condition-rule-remove': removeConditionRule(btn.dataset.index); break;
     case 'sequence-step-add': addSequenceStep(); break;
     case 'sequence-step-remove': removeSequenceStep(btn.dataset.index); break;
+    case 'sensor-channel-add': addSensorChannel(); break;
+    case 'sensor-channel-remove': removeSensorChannel(btn.dataset.index); break;
   }
 }
 
@@ -489,6 +559,8 @@ function renderTemplateSection(dev) {
     body = renderIntervalTemplate(dev);
   } else if (tplType === 'sequence_lock') {
     body = renderSequenceTemplate(dev);
+  } else if (tplType === 'sensor_monitor') {
+    body = renderSensorTemplate(dev);
   }
   return `
     <div class="dw-section">
@@ -730,6 +802,143 @@ function renderSequenceTemplate(dev) {
       <div class="dw-field"><label>Scenario ID</label><input data-template-field="sequence" data-subfield="fail_scenario" value="${escapeAttr(tpl.fail_scenario || '')}" placeholder="scenario_fail"></div>
       <div class="dw-hint small">Failure actions run when timeout expires or an unexpected topic arrives.</div>
     </div>`;
+}
+
+function renderSensorTemplate(dev) {
+  ensureSensorTemplate(dev);
+  const tpl = dev.template?.sensor || {};
+  const baseParseOptions = renderSensorParseModeOptions(tpl.parse_mode);
+  const channels = (tpl.channels || []).map((ch, idx) => renderSensorChannel(ch, idx)).join('');
+  const addDisabled = tpl.channels && tpl.channels.length >= SENSOR_CHANNEL_LIMIT ? 'disabled' : '';
+  return `
+    <div class="dw-section">
+      <h5>Defaults</h5>
+      <div class="dw-field required">
+        <label>Default topic / prefix</label>
+        <input data-template-field="sensor-base" data-subfield="topic" value="${escapeAttr(tpl.topic || '')}" placeholder="sensors/" data-required="true">
+        <div class="dw-hint small">Used when channel topic is empty.</div>
+      </div>
+      <div class="dw-field">
+        <label>Default display name</label>
+        <input data-template-field="sensor-base" data-subfield="name" value="${escapeAttr(tpl.name || '')}" placeholder="Monitoring card title">
+      </div>
+      <div class="dw-field">
+        <label>Default description</label>
+        <input data-template-field="sensor-base" data-subfield="description" value="${escapeAttr(tpl.description || '')}" placeholder="Shown under sensor title">
+      </div>
+      <div class="dw-field">
+        <label>Default units</label>
+        <input data-template-field="sensor-base" data-subfield="units" value="${escapeAttr(tpl.units || '')}" placeholder="°C">
+      </div>
+      <div class="dw-field">
+        <label>Default decimals</label>
+        <input type="number" min="0" max="6" data-template-field="sensor-base" data-subfield="decimals" value="${tpl.decimals || 0}">
+      </div>
+      <div class="dw-field">
+        <label>Default parse mode</label>
+        <select data-template-field="sensor-base" data-subfield="parse_mode">${baseParseOptions}</select>
+        <div class="dw-hint small">Use JSON mode if payload is JSON and value stored under a key.</div>
+      </div>
+      <div class="dw-field">
+        <label>Default JSON key</label>
+        <input data-template-field="sensor-base" data-subfield="json_key" value="${escapeAttr(tpl.json_key || '')}" placeholder="value">
+      </div>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-base" data-subfield="display_monitor" ${tpl.display_monitor === false ? '' : 'checked'}>Show in Monitoring</label>
+      </div>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-base" data-subfield="history_enabled" ${tpl.history_enabled ? 'checked' : ''}>Keep history samples</label>
+      </div>
+    </div>
+    <div class="dw-section">
+      <div class="dw-section-head">
+        <span>Channels</span>
+        <button data-action="sensor-channel-add" ${addDisabled}>Add channel</button>
+      </div>
+      ${channels || "<div class='dw-empty small'>No channels configured. Defaults above will be used.</div>"}
+      <div class="dw-hint small">Up to ${SENSOR_CHANNEL_LIMIT} channels can be tracked per device.</div>
+    </div>`;
+}
+
+function renderSensorChannel(channel, idx) {
+  const parseOptions = renderSensorParseModeOptions(channel.parse_mode);
+  const monitorChecked = channel.display_monitor === false ? '' : 'checked';
+  const historyChecked = channel.history_enabled ? 'checked' : '';
+  return `
+    <div class="dw-slot">
+      <div class="dw-slot-head">Channel ${idx + 1}<button class="danger small" data-action="sensor-channel-remove" data-index="${idx}">&times;</button></div>
+      <div class="dw-field"><label>Channel ID</label><input data-template-field="sensor-channel" data-subfield="id" data-index="${idx}" value="${escapeAttr(channel.id || '')}" placeholder="temperature"></div>
+      <div class="dw-field"><label>Name</label><input data-template-field="sensor-channel" data-subfield="name" data-index="${idx}" value="${escapeAttr(channel.name || '')}" placeholder="Temperature"></div>
+      <div class="dw-field"><label>Description</label><input data-template-field="sensor-channel" data-subfield="description" data-index="${idx}" value="${escapeAttr(channel.description || '')}" placeholder="Optional note"></div>
+      <div class="dw-field required"><label>Topic</label><input data-template-field="sensor-channel" data-subfield="topic" data-index="${idx}" value="${escapeAttr(channel.topic || '')}" placeholder="sensors/temp" data-required="true"></div>
+      <div class="dw-field"><label>Units</label><input data-template-field="sensor-channel" data-subfield="units" data-index="${idx}" value="${escapeAttr(channel.units || '')}" placeholder="°C"></div>
+      <div class="dw-field"><label>Decimals</label><input type="number" min="0" max="6" data-template-field="sensor-channel" data-subfield="decimals" data-index="${idx}" value="${channel.decimals || 0}"></div>
+      <div class="dw-field">
+        <label>Parse mode</label>
+        <select data-template-field="sensor-channel" data-subfield="parse_mode" data-index="${idx}">${parseOptions}</select>
+      </div>
+      <div class="dw-field">
+        <label>JSON key</label>
+        <input data-template-field="sensor-channel" data-subfield="json_key" data-index="${idx}" value="${escapeAttr(channel.json_key || '')}" placeholder="value">
+        <div class="dw-hint small">Required when parse mode is JSON.</div>
+      </div>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-channel" data-subfield="display_monitor" data-index="${idx}" ${monitorChecked}>Show card</label>
+      </div>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-channel" data-subfield="history_enabled" data-index="${idx}" ${historyChecked}>Keep history</label>
+      </div>
+      ${renderSensorThreshold(channel.warn, idx, 'warn', 'Warn threshold')}
+      ${renderSensorThreshold(channel.alarm, idx, 'alarm', 'Alarm threshold')}
+    </div>`;
+}
+
+function renderSensorThreshold(threshold, idx, kind, title) {
+  const th = threshold && typeof threshold === 'object' ? threshold : defaultSensorThreshold();
+  const enabled = th.enabled ? 'checked' : '';
+  const compare = th.compare === 'below_or_equal' ? 'below_or_equal' : 'above_or_equal';
+  const disableInputs = '';
+  return `
+    <div class="dw-subsection">
+      <h6>${title}</h6>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="enabled" data-index="${idx}" ${enabled}>Enable threshold</label>
+      </div>
+      <div class="dw-field">
+        <label>Compare</label>
+        <select data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="compare" data-index="${idx}">
+          <option value="above_or_equal" ${compare === 'above_or_equal' ? 'selected' : ''}>Value ≥ threshold</option>
+          <option value="below_or_equal" ${compare === 'below_or_equal' ? 'selected' : ''}>Value ≤ threshold</option>
+        </select>
+      </div>
+      <div class="dw-field">
+        <label>Value</label>
+        <input type="number" step="any" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="value" data-index="${idx}" value="${th.value !== undefined ? th.value : ''}" ${disableInputs}>
+      </div>
+      <div class="dw-field">
+        <label>Scenario ID</label>
+        <input data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="scenario" data-index="${idx}" value="${escapeAttr(th.scenario || '')}" placeholder="alarm_scenario" ${disableInputs}>
+      </div>
+      <div class="dw-field">
+        <label>Hysteresis</label>
+        <input type="number" step="any" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="hysteresis" data-index="${idx}" value="${th.hysteresis || 0}">
+      </div>
+      <div class="dw-field">
+        <label>Min duration (ms)</label>
+        <input type="number" min="0" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="min_duration_ms" data-index="${idx}" value="${th.min_duration_ms || 0}">
+      </div>
+      <div class="dw-field">
+        <label>Cooldown (ms)</label>
+        <input type="number" min="0" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="cooldown_ms" data-index="${idx}" value="${th.cooldown_ms || 0}">
+      </div>
+    </div>`;
+}
+
+function renderSensorParseModeOptions(selected) {
+  const mode = selected === 'json_number' ? 'json_number' : 'raw_number';
+  return `
+    <option value="raw_number" ${mode === 'raw_number' ? 'selected' : ''}>Raw payload</option>
+    <option value="json_number" ${mode === 'json_number' ? 'selected' : ''}>JSON number</option>`;
 }
 
 function renderTopicsSection(dev) {
@@ -1210,6 +1419,70 @@ function updateTemplateField(el) {
       }
       break;
     }
+    case 'sensor-base': {
+      ensureSensorTemplate(dev);
+      const tpl = dev.template?.sensor;
+      if (!tpl) return;
+      const sub = el.dataset.subfield;
+      if (sub === 'decimals') {
+        tpl.decimals = clampSensorDecimals(el.value);
+        el.value = tpl.decimals;
+      } else if (sub === 'parse_mode') {
+        tpl.parse_mode = el.value === 'json_number' ? 'json_number' : 'raw_number';
+      } else if (sub === 'display_monitor' || sub === 'history_enabled') {
+        tpl[sub] = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else {
+        tpl[sub] = el.value;
+      }
+      break;
+    }
+    case 'sensor-channel': {
+      ensureSensorTemplate(dev);
+      const tpl = dev.template?.sensor;
+      if (!tpl) return;
+      const idx = parseInt(el.dataset.index, 10);
+      if (Number.isNaN(idx) || !tpl.channels || !tpl.channels[idx]) return;
+      const channel = tpl.channels[idx];
+      const sub = el.dataset.subfield;
+      if (sub === 'decimals') {
+        channel.decimals = clampSensorDecimals(el.value);
+        el.value = channel.decimals;
+      } else if (sub === 'parse_mode') {
+        channel.parse_mode = el.value === 'json_number' ? 'json_number' : 'raw_number';
+      } else if (sub === 'display_monitor' || sub === 'history_enabled') {
+        channel[sub] = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else {
+        channel[sub] = el.value;
+      }
+      break;
+    }
+    case 'sensor-channel-threshold': {
+      ensureSensorTemplate(dev);
+      const tpl = dev.template?.sensor;
+      if (!tpl) return;
+      const idx = parseInt(el.dataset.index, 10);
+      if (Number.isNaN(idx) || !tpl.channels || !tpl.channels[idx]) return;
+      const kind = el.dataset.kind === 'alarm' ? 'alarm' : 'warn';
+      tpl.channels[idx][kind] = sanitizeSensorThreshold(tpl.channels[idx][kind]);
+      const target = tpl.channels[idx][kind];
+      const sub = el.dataset.subfield;
+      if (sub === 'enabled') {
+        target.enabled = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else if (sub === 'compare') {
+        target.compare = el.value === 'below_or_equal' ? 'below_or_equal' : 'above_or_equal';
+      } else if (sub === 'value' || sub === 'hysteresis') {
+        const val = parseFloat(el.value);
+        target[sub] = Number.isNaN(val) ? 0 : val;
+        el.value = target[sub];
+      } else if (sub === 'min_duration_ms' || sub === 'cooldown_ms') {
+        const val = parseInt(el.value, 10);
+        target[sub] = Number.isNaN(val) ? 0 : Math.max(val, 0);
+        el.value = target[sub];
+      } else if (sub === 'scenario') {
+        target.scenario = el.value;
+      }
+      break;
+    }
     default:
       return;
   }
@@ -1289,7 +1562,8 @@ function setDeviceTemplate(dev, type) {
                    'on_flag',
                    'if_condition',
                    'interval_task',
-                   'sequence_lock'];
+                   'sequence_lock',
+                   'sensor_monitor'];
   if (!allowed.includes(nextType)) {
     dev.template = null;
     markDirty();
@@ -1332,6 +1606,11 @@ function setDeviceTemplate(dev, type) {
         type: nextType,
         sequence: defaultSequenceTemplate(),
       };
+    } else if (nextType === 'sensor_monitor') {
+      dev.template = {
+        type: nextType,
+        sensor: defaultSensorTemplate(),
+      };
     }
   }
   if (nextType === 'uid_validator') {
@@ -1348,6 +1627,8 @@ function setDeviceTemplate(dev, type) {
     ensureIntervalTemplate(dev);
   } else if (nextType === 'sequence_lock') {
     ensureSequenceTemplate(dev);
+  } else if (nextType === 'sensor_monitor') {
+    ensureSensorTemplate(dev);
   }
   markDirty();
   renderDeviceDetail();
@@ -1427,6 +1708,74 @@ function defaultSequenceTemplate() {
     fail_audio_track: '',
     fail_scenario: '',
   };
+}
+
+function defaultSensorThreshold() {
+  return {
+    enabled: false,
+    value: 0,
+    compare: 'above_or_equal',
+    scenario: '',
+    hysteresis: 0,
+    min_duration_ms: 0,
+    cooldown_ms: 0,
+  };
+}
+
+function defaultSensorChannel() {
+  return {
+    id: '',
+    name: '',
+    description: '',
+    topic: '',
+    units: '',
+    decimals: 0,
+    parse_mode: 'raw_number',
+    json_key: '',
+    display_monitor: true,
+    history_enabled: true,
+    warn: defaultSensorThreshold(),
+    alarm: defaultSensorThreshold(),
+  };
+}
+
+function defaultSensorTemplate() {
+  return {
+    topic: '',
+    name: '',
+    description: '',
+    units: '',
+    decimals: 0,
+    parse_mode: 'raw_number',
+    json_key: '',
+    display_monitor: true,
+    history_enabled: true,
+    warn: defaultSensorThreshold(),
+    alarm: defaultSensorThreshold(),
+    channels: [defaultSensorChannel()],
+  };
+}
+
+function clampSensorDecimals(value) {
+  const num = parseInt(value, 10);
+  if (Number.isNaN(num)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(6, num));
+}
+
+function sanitizeSensorThreshold(threshold) {
+  const th = threshold && typeof threshold === 'object' ? threshold : defaultSensorThreshold();
+  th.enabled = !!th.enabled;
+  th.value = typeof th.value === 'number' ? th.value : (parseFloat(th.value) || 0);
+  th.compare = th.compare === 'below_or_equal' ? 'below_or_equal' : 'above_or_equal';
+  th.scenario = th.scenario || '';
+  th.hysteresis = typeof th.hysteresis === 'number' ? th.hysteresis : (parseFloat(th.hysteresis) || 0);
+  const duration = parseInt(th.min_duration_ms, 10);
+  th.min_duration_ms = Number.isNaN(duration) ? 0 : Math.max(duration, 0);
+  const cooldown = parseInt(th.cooldown_ms, 10);
+  th.cooldown_ms = Number.isNaN(cooldown) ? 0 : Math.max(cooldown, 0);
+  return th;
 }
 
 function ensureUidTemplate(dev) {
@@ -1578,6 +1927,50 @@ function ensureSequenceTemplate(dev) {
     if (typeof seq[key] !== 'string') {
       seq[key] = '';
     }
+  });
+}
+
+function ensureSensorTemplate(dev) {
+  if (!dev || !dev.template || dev.template.type !== 'sensor_monitor') {
+    return;
+  }
+  if (!dev.template.sensor) {
+    dev.template.sensor = defaultSensorTemplate();
+  }
+  const tpl = dev.template.sensor;
+  tpl.topic = tpl.topic || '';
+  tpl.name = tpl.name || '';
+  tpl.description = tpl.description || '';
+  tpl.units = tpl.units || '';
+  tpl.decimals = clampSensorDecimals(tpl.decimals);
+  tpl.parse_mode = tpl.parse_mode === 'json_number' ? 'json_number' : 'raw_number';
+  tpl.json_key = tpl.json_key || '';
+  tpl.display_monitor = tpl.display_monitor === false ? false : true;
+  tpl.history_enabled = !!tpl.history_enabled;
+  tpl.warn = sanitizeSensorThreshold(tpl.warn);
+  tpl.alarm = sanitizeSensorThreshold(tpl.alarm);
+  if (!Array.isArray(tpl.channels)) {
+    tpl.channels = [];
+  }
+  tpl.channels = tpl.channels.slice(0, SENSOR_CHANNEL_LIMIT);
+  if (!tpl.channels.length) {
+    tpl.channels.push(defaultSensorChannel());
+  }
+  tpl.channels.forEach((channel) => {
+    channel.id = channel.id || '';
+    channel.name = channel.name || '';
+    channel.description = channel.description || '';
+    if (!channel.topic) {
+      channel.topic = tpl.topic || '';
+    }
+    channel.units = channel.units || tpl.units || '';
+    channel.decimals = clampSensorDecimals(channel.decimals !== undefined ? channel.decimals : tpl.decimals);
+    channel.parse_mode = channel.parse_mode === 'json_number' ? 'json_number' : tpl.parse_mode;
+    channel.json_key = channel.json_key || (channel.parse_mode === 'json_number' ? (tpl.json_key || '') : '');
+    channel.display_monitor = channel.display_monitor === false ? false : true;
+    channel.history_enabled = channel.history_enabled === false ? false : true;
+    channel.warn = sanitizeSensorThreshold(channel.warn);
+    channel.alarm = sanitizeSensorThreshold(channel.alarm);
   });
 }
 
@@ -1752,6 +2145,47 @@ function removeSequenceStep(indexStr) {
   renderDeviceDetail();
 }
 
+function addSensorChannel() {
+  const dev = currentDevice();
+  if (!dev || dev.template?.type !== 'sensor_monitor') {
+    return;
+  }
+  ensureSensorTemplate(dev);
+  const tpl = dev.template.sensor;
+  if (tpl.channels.length >= SENSOR_CHANNEL_LIMIT) {
+    setStatus('Channel limit reached', '#fbbf24');
+    return;
+  }
+  const channel = defaultSensorChannel();
+  channel.topic = tpl.topic || '';
+  channel.units = tpl.units || '';
+  channel.parse_mode = tpl.parse_mode || 'raw_number';
+  channel.json_key = channel.parse_mode === 'json_number' ? (tpl.json_key || '') : '';
+  tpl.channels.push(channel);
+  markDirty();
+  renderDeviceDetail();
+}
+
+function removeSensorChannel(indexStr) {
+  const dev = currentDevice();
+  if (!dev || dev.template?.type !== 'sensor_monitor') {
+    return;
+  }
+  ensureSensorTemplate(dev);
+  const tpl = dev.template.sensor;
+  const idx = parseInt(indexStr, 10);
+  if (Number.isNaN(idx) || idx < 0 || idx >= tpl.channels.length) {
+    return;
+  }
+  if (tpl.channels.length <= 1) {
+    setStatus('At least one channel required', '#fbbf24');
+    return;
+  }
+  tpl.channels.splice(idx, 1);
+  markDirty();
+  renderDeviceDetail();
+}
+
 function addWaitRule(stepIdxStr) {
   const idx = parseInt(stepIdxStr, 10);
   const scen = currentScenario();
@@ -1810,6 +2244,8 @@ function normalizeDevice(dev) {
   dev.scenarios.forEach(normalizeScenario);
   if (dev.template && dev.template.type === 'signal_hold') {
     ensureSignalTemplate(dev);
+  } else if (dev.template && dev.template.type === 'sensor_monitor') {
+    ensureSensorTemplate(dev);
   }
 }
 
@@ -1998,6 +2434,17 @@ function stripTemplateRuntimeFields(dev) {
       if (slot && Object.prototype.hasOwnProperty.call(slot, 'last_value')) {
         delete slot.last_value;
       }
+    });
+  }
+  if (dev.template.sensor && Array.isArray(dev.template.sensor.channels)) {
+    dev.template.sensor.channels.forEach((channel) => {
+      if (!channel) {
+        return;
+      }
+      delete channel.last_value;
+      delete channel.last_update_ms;
+      delete channel.status;
+      delete channel.history;
     });
   }
 }

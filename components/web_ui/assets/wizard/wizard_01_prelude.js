@@ -11,10 +11,12 @@ const TEMPLATE_TYPES = [
   {value: 'if_condition', label: 'Conditional scenario'},
   {value: 'interval_task', label: 'Interval task'},
   {value: 'sequence_lock', label: 'Sequence lock'},
+  {value: 'sensor_monitor', label: 'Sensor monitor'},
 ];
 const MQTT_RULE_LIMIT = 8;
 const FLAG_RULE_LIMIT = 8;
 const SEQUENCE_STEP_LIMIT = 8;
+const SENSOR_CHANNEL_LIMIT = 8;
 const WIZARD_TEMPLATES = {
   blank_device: {
     label: 'Blank Device',
@@ -27,6 +29,72 @@ const WIZARD_TEMPLATES = {
       base.scenarios = [];
       base.topics = [];
       return base;
+    },
+  },
+  sensor_monitor: {
+    label: 'Sensor Monitor',
+    description: 'Render Monitoring cards fed by MQTT telemetry with warn/alarm thresholds.',
+    defaults: {
+      deviceName: 'Sensor monitor',
+      baseTopic: 'sensors/',
+      channelTopic: 'sensors/temperature',
+      channelId: 'temperature',
+      channelName: 'Temperature',
+      channelUnits: '°C',
+      channelParseMode: 'raw_number',
+      channelJsonKey: '',
+    },
+    fields: [
+      {name: 'baseTopic', label: 'Default topic/prefix', placeholder: 'sensors/'},
+      {name: 'channelTopic', label: 'Channel topic', placeholder: 'sensors/temperature'},
+      {name: 'channelId', label: 'Channel ID', placeholder: 'temperature'},
+      {name: 'channelName', label: 'Channel name', placeholder: 'Temperature'},
+      {name: 'channelUnits', label: 'Units', placeholder: '°C'},
+      {name: 'channelParseMode', label: 'Parse mode (raw_number/json_number)', placeholder: 'raw_number'},
+      {name: 'channelJsonKey', label: 'JSON key (for json mode)', placeholder: 'value'},
+    ],
+    build(base, data) {
+      const device = base;
+      const tpl = defaultSensorTemplate();
+      const baseTopic = (data.baseTopic || 'sensors/').trim() || 'sensors/';
+      tpl.topic = baseTopic;
+      const parseMode = data.channelParseMode === 'json_number' ? 'json_number' : 'raw_number';
+      tpl.parse_mode = parseMode;
+      tpl.display_monitor = true;
+      tpl.history_enabled = true;
+      if (parseMode === 'json_number') {
+        tpl.json_key = (data.channelJsonKey || 'value').trim();
+      } else {
+        tpl.json_key = (data.channelJsonKey || '').trim();
+      }
+      const channel = defaultSensorChannel();
+      channel.id = slugify(data.channelId || data.channelName || 'sensor_channel');
+      channel.name = (data.channelName || 'Sensor').trim();
+      tpl.name = channel.name;
+      tpl.units = (data.channelUnits || '').trim();
+      channel.units = tpl.units;
+      channel.parse_mode = parseMode;
+      channel.json_key = parseMode === 'json_number'
+        ? (data.channelJsonKey || 'value').trim()
+        : (data.channelJsonKey || '').trim();
+      channel.display_monitor = true;
+      channel.history_enabled = true;
+      let channelTopic = (data.channelTopic || '').trim();
+      if (!channelTopic) {
+        const suffix = channel.id || 'sensor';
+        if (baseTopic.endsWith('/')) {
+          channelTopic = `${baseTopic}${suffix}`;
+        } else {
+          channelTopic = `${baseTopic}/${suffix}`;
+        }
+      }
+      channel.topic = channelTopic;
+      tpl.channels = [channel];
+      device.template = {
+        type: 'sensor_monitor',
+        sensor: tpl,
+      };
+      return device;
     },
   },
 };
@@ -270,6 +338,8 @@ function handleDetailClick(ev) {
     case 'condition-rule-remove': removeConditionRule(btn.dataset.index); break;
     case 'sequence-step-add': addSequenceStep(); break;
     case 'sequence-step-remove': removeSequenceStep(btn.dataset.index); break;
+    case 'sensor-channel-add': addSensorChannel(); break;
+    case 'sensor-channel-remove': removeSensorChannel(btn.dataset.index); break;
   }
 }
 

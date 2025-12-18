@@ -320,6 +320,70 @@ function updateTemplateField(el) {
       }
       break;
     }
+    case 'sensor-base': {
+      ensureSensorTemplate(dev);
+      const tpl = dev.template?.sensor;
+      if (!tpl) return;
+      const sub = el.dataset.subfield;
+      if (sub === 'decimals') {
+        tpl.decimals = clampSensorDecimals(el.value);
+        el.value = tpl.decimals;
+      } else if (sub === 'parse_mode') {
+        tpl.parse_mode = el.value === 'json_number' ? 'json_number' : 'raw_number';
+      } else if (sub === 'display_monitor' || sub === 'history_enabled') {
+        tpl[sub] = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else {
+        tpl[sub] = el.value;
+      }
+      break;
+    }
+    case 'sensor-channel': {
+      ensureSensorTemplate(dev);
+      const tpl = dev.template?.sensor;
+      if (!tpl) return;
+      const idx = parseInt(el.dataset.index, 10);
+      if (Number.isNaN(idx) || !tpl.channels || !tpl.channels[idx]) return;
+      const channel = tpl.channels[idx];
+      const sub = el.dataset.subfield;
+      if (sub === 'decimals') {
+        channel.decimals = clampSensorDecimals(el.value);
+        el.value = channel.decimals;
+      } else if (sub === 'parse_mode') {
+        channel.parse_mode = el.value === 'json_number' ? 'json_number' : 'raw_number';
+      } else if (sub === 'display_monitor' || sub === 'history_enabled') {
+        channel[sub] = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else {
+        channel[sub] = el.value;
+      }
+      break;
+    }
+    case 'sensor-channel-threshold': {
+      ensureSensorTemplate(dev);
+      const tpl = dev.template?.sensor;
+      if (!tpl) return;
+      const idx = parseInt(el.dataset.index, 10);
+      if (Number.isNaN(idx) || !tpl.channels || !tpl.channels[idx]) return;
+      const kind = el.dataset.kind === 'alarm' ? 'alarm' : 'warn';
+      tpl.channels[idx][kind] = sanitizeSensorThreshold(tpl.channels[idx][kind]);
+      const target = tpl.channels[idx][kind];
+      const sub = el.dataset.subfield;
+      if (sub === 'enabled') {
+        target.enabled = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else if (sub === 'compare') {
+        target.compare = el.value === 'below_or_equal' ? 'below_or_equal' : 'above_or_equal';
+      } else if (sub === 'value' || sub === 'hysteresis') {
+        const val = parseFloat(el.value);
+        target[sub] = Number.isNaN(val) ? 0 : val;
+        el.value = target[sub];
+      } else if (sub === 'min_duration_ms' || sub === 'cooldown_ms') {
+        const val = parseInt(el.value, 10);
+        target[sub] = Number.isNaN(val) ? 0 : Math.max(val, 0);
+        el.value = target[sub];
+      } else if (sub === 'scenario') {
+        target.scenario = el.value;
+      }
+      break;
+    }
     default:
       return;
   }
@@ -399,7 +463,8 @@ function setDeviceTemplate(dev, type) {
                    'on_flag',
                    'if_condition',
                    'interval_task',
-                   'sequence_lock'];
+                   'sequence_lock',
+                   'sensor_monitor'];
   if (!allowed.includes(nextType)) {
     dev.template = null;
     markDirty();
@@ -442,6 +507,11 @@ function setDeviceTemplate(dev, type) {
         type: nextType,
         sequence: defaultSequenceTemplate(),
       };
+    } else if (nextType === 'sensor_monitor') {
+      dev.template = {
+        type: nextType,
+        sensor: defaultSensorTemplate(),
+      };
     }
   }
   if (nextType === 'uid_validator') {
@@ -458,6 +528,8 @@ function setDeviceTemplate(dev, type) {
     ensureIntervalTemplate(dev);
   } else if (nextType === 'sequence_lock') {
     ensureSequenceTemplate(dev);
+  } else if (nextType === 'sensor_monitor') {
+    ensureSensorTemplate(dev);
   }
   markDirty();
   renderDeviceDetail();
@@ -537,6 +609,74 @@ function defaultSequenceTemplate() {
     fail_audio_track: '',
     fail_scenario: '',
   };
+}
+
+function defaultSensorThreshold() {
+  return {
+    enabled: false,
+    value: 0,
+    compare: 'above_or_equal',
+    scenario: '',
+    hysteresis: 0,
+    min_duration_ms: 0,
+    cooldown_ms: 0,
+  };
+}
+
+function defaultSensorChannel() {
+  return {
+    id: '',
+    name: '',
+    description: '',
+    topic: '',
+    units: '',
+    decimals: 0,
+    parse_mode: 'raw_number',
+    json_key: '',
+    display_monitor: true,
+    history_enabled: true,
+    warn: defaultSensorThreshold(),
+    alarm: defaultSensorThreshold(),
+  };
+}
+
+function defaultSensorTemplate() {
+  return {
+    topic: '',
+    name: '',
+    description: '',
+    units: '',
+    decimals: 0,
+    parse_mode: 'raw_number',
+    json_key: '',
+    display_monitor: true,
+    history_enabled: true,
+    warn: defaultSensorThreshold(),
+    alarm: defaultSensorThreshold(),
+    channels: [defaultSensorChannel()],
+  };
+}
+
+function clampSensorDecimals(value) {
+  const num = parseInt(value, 10);
+  if (Number.isNaN(num)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(6, num));
+}
+
+function sanitizeSensorThreshold(threshold) {
+  const th = threshold && typeof threshold === 'object' ? threshold : defaultSensorThreshold();
+  th.enabled = !!th.enabled;
+  th.value = typeof th.value === 'number' ? th.value : (parseFloat(th.value) || 0);
+  th.compare = th.compare === 'below_or_equal' ? 'below_or_equal' : 'above_or_equal';
+  th.scenario = th.scenario || '';
+  th.hysteresis = typeof th.hysteresis === 'number' ? th.hysteresis : (parseFloat(th.hysteresis) || 0);
+  const duration = parseInt(th.min_duration_ms, 10);
+  th.min_duration_ms = Number.isNaN(duration) ? 0 : Math.max(duration, 0);
+  const cooldown = parseInt(th.cooldown_ms, 10);
+  th.cooldown_ms = Number.isNaN(cooldown) ? 0 : Math.max(cooldown, 0);
+  return th;
 }
 
 function ensureUidTemplate(dev) {
@@ -688,6 +828,50 @@ function ensureSequenceTemplate(dev) {
     if (typeof seq[key] !== 'string') {
       seq[key] = '';
     }
+  });
+}
+
+function ensureSensorTemplate(dev) {
+  if (!dev || !dev.template || dev.template.type !== 'sensor_monitor') {
+    return;
+  }
+  if (!dev.template.sensor) {
+    dev.template.sensor = defaultSensorTemplate();
+  }
+  const tpl = dev.template.sensor;
+  tpl.topic = tpl.topic || '';
+  tpl.name = tpl.name || '';
+  tpl.description = tpl.description || '';
+  tpl.units = tpl.units || '';
+  tpl.decimals = clampSensorDecimals(tpl.decimals);
+  tpl.parse_mode = tpl.parse_mode === 'json_number' ? 'json_number' : 'raw_number';
+  tpl.json_key = tpl.json_key || '';
+  tpl.display_monitor = tpl.display_monitor === false ? false : true;
+  tpl.history_enabled = !!tpl.history_enabled;
+  tpl.warn = sanitizeSensorThreshold(tpl.warn);
+  tpl.alarm = sanitizeSensorThreshold(tpl.alarm);
+  if (!Array.isArray(tpl.channels)) {
+    tpl.channels = [];
+  }
+  tpl.channels = tpl.channels.slice(0, SENSOR_CHANNEL_LIMIT);
+  if (!tpl.channels.length) {
+    tpl.channels.push(defaultSensorChannel());
+  }
+  tpl.channels.forEach((channel) => {
+    channel.id = channel.id || '';
+    channel.name = channel.name || '';
+    channel.description = channel.description || '';
+    if (!channel.topic) {
+      channel.topic = tpl.topic || '';
+    }
+    channel.units = channel.units || tpl.units || '';
+    channel.decimals = clampSensorDecimals(channel.decimals !== undefined ? channel.decimals : tpl.decimals);
+    channel.parse_mode = channel.parse_mode === 'json_number' ? 'json_number' : tpl.parse_mode;
+    channel.json_key = channel.json_key || (channel.parse_mode === 'json_number' ? (tpl.json_key || '') : '');
+    channel.display_monitor = channel.display_monitor === false ? false : true;
+    channel.history_enabled = channel.history_enabled === false ? false : true;
+    channel.warn = sanitizeSensorThreshold(channel.warn);
+    channel.alarm = sanitizeSensorThreshold(channel.alarm);
   });
 }
 
@@ -862,6 +1046,47 @@ function removeSequenceStep(indexStr) {
   renderDeviceDetail();
 }
 
+function addSensorChannel() {
+  const dev = currentDevice();
+  if (!dev || dev.template?.type !== 'sensor_monitor') {
+    return;
+  }
+  ensureSensorTemplate(dev);
+  const tpl = dev.template.sensor;
+  if (tpl.channels.length >= SENSOR_CHANNEL_LIMIT) {
+    setStatus('Channel limit reached', '#fbbf24');
+    return;
+  }
+  const channel = defaultSensorChannel();
+  channel.topic = tpl.topic || '';
+  channel.units = tpl.units || '';
+  channel.parse_mode = tpl.parse_mode || 'raw_number';
+  channel.json_key = channel.parse_mode === 'json_number' ? (tpl.json_key || '') : '';
+  tpl.channels.push(channel);
+  markDirty();
+  renderDeviceDetail();
+}
+
+function removeSensorChannel(indexStr) {
+  const dev = currentDevice();
+  if (!dev || dev.template?.type !== 'sensor_monitor') {
+    return;
+  }
+  ensureSensorTemplate(dev);
+  const tpl = dev.template.sensor;
+  const idx = parseInt(indexStr, 10);
+  if (Number.isNaN(idx) || idx < 0 || idx >= tpl.channels.length) {
+    return;
+  }
+  if (tpl.channels.length <= 1) {
+    setStatus('At least one channel required', '#fbbf24');
+    return;
+  }
+  tpl.channels.splice(idx, 1);
+  markDirty();
+  renderDeviceDetail();
+}
+
 function addWaitRule(stepIdxStr) {
   const idx = parseInt(stepIdxStr, 10);
   const scen = currentScenario();
@@ -920,6 +1145,8 @@ function normalizeDevice(dev) {
   dev.scenarios.forEach(normalizeScenario);
   if (dev.template && dev.template.type === 'signal_hold') {
     ensureSignalTemplate(dev);
+  } else if (dev.template && dev.template.type === 'sensor_monitor') {
+    ensureSensorTemplate(dev);
   }
 }
 

@@ -113,6 +113,17 @@ function stripTemplateRuntimeFields(dev) {
       }
     });
   }
+  if (dev.template.sensor && Array.isArray(dev.template.sensor.channels)) {
+    dev.template.sensor.channels.forEach((channel) => {
+      if (!channel) {
+        return;
+      }
+      delete channel.last_value;
+      delete channel.last_update_ms;
+      delete channel.status;
+      delete channel.history;
+    });
+  }
 }
 
 function toInt(value) {

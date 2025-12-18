@@ -87,6 +87,8 @@ function renderTemplateSection(dev) {
     body = renderIntervalTemplate(dev);
   } else if (tplType === 'sequence_lock') {
     body = renderSequenceTemplate(dev);
+  } else if (tplType === 'sensor_monitor') {
+    body = renderSensorTemplate(dev);
   }
   return `
     <div class="dw-section">
@@ -328,6 +330,143 @@ function renderSequenceTemplate(dev) {
       <div class="dw-field"><label>Scenario ID</label><input data-template-field="sequence" data-subfield="fail_scenario" value="${escapeAttr(tpl.fail_scenario || '')}" placeholder="scenario_fail"></div>
       <div class="dw-hint small">Failure actions run when timeout expires or an unexpected topic arrives.</div>
     </div>`;
+}
+
+function renderSensorTemplate(dev) {
+  ensureSensorTemplate(dev);
+  const tpl = dev.template?.sensor || {};
+  const baseParseOptions = renderSensorParseModeOptions(tpl.parse_mode);
+  const channels = (tpl.channels || []).map((ch, idx) => renderSensorChannel(ch, idx)).join('');
+  const addDisabled = tpl.channels && tpl.channels.length >= SENSOR_CHANNEL_LIMIT ? 'disabled' : '';
+  return `
+    <div class="dw-section">
+      <h5>Defaults</h5>
+      <div class="dw-field required">
+        <label>Default topic / prefix</label>
+        <input data-template-field="sensor-base" data-subfield="topic" value="${escapeAttr(tpl.topic || '')}" placeholder="sensors/" data-required="true">
+        <div class="dw-hint small">Used when channel topic is empty.</div>
+      </div>
+      <div class="dw-field">
+        <label>Default display name</label>
+        <input data-template-field="sensor-base" data-subfield="name" value="${escapeAttr(tpl.name || '')}" placeholder="Monitoring card title">
+      </div>
+      <div class="dw-field">
+        <label>Default description</label>
+        <input data-template-field="sensor-base" data-subfield="description" value="${escapeAttr(tpl.description || '')}" placeholder="Shown under sensor title">
+      </div>
+      <div class="dw-field">
+        <label>Default units</label>
+        <input data-template-field="sensor-base" data-subfield="units" value="${escapeAttr(tpl.units || '')}" placeholder="°C">
+      </div>
+      <div class="dw-field">
+        <label>Default decimals</label>
+        <input type="number" min="0" max="6" data-template-field="sensor-base" data-subfield="decimals" value="${tpl.decimals || 0}">
+      </div>
+      <div class="dw-field">
+        <label>Default parse mode</label>
+        <select data-template-field="sensor-base" data-subfield="parse_mode">${baseParseOptions}</select>
+        <div class="dw-hint small">Use JSON mode if payload is JSON and value stored under a key.</div>
+      </div>
+      <div class="dw-field">
+        <label>Default JSON key</label>
+        <input data-template-field="sensor-base" data-subfield="json_key" value="${escapeAttr(tpl.json_key || '')}" placeholder="value">
+      </div>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-base" data-subfield="display_monitor" ${tpl.display_monitor === false ? '' : 'checked'}>Show in Monitoring</label>
+      </div>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-base" data-subfield="history_enabled" ${tpl.history_enabled ? 'checked' : ''}>Keep history samples</label>
+      </div>
+    </div>
+    <div class="dw-section">
+      <div class="dw-section-head">
+        <span>Channels</span>
+        <button data-action="sensor-channel-add" ${addDisabled}>Add channel</button>
+      </div>
+      ${channels || "<div class='dw-empty small'>No channels configured. Defaults above will be used.</div>"}
+      <div class="dw-hint small">Up to ${SENSOR_CHANNEL_LIMIT} channels can be tracked per device.</div>
+    </div>`;
+}
+
+function renderSensorChannel(channel, idx) {
+  const parseOptions = renderSensorParseModeOptions(channel.parse_mode);
+  const monitorChecked = channel.display_monitor === false ? '' : 'checked';
+  const historyChecked = channel.history_enabled ? 'checked' : '';
+  return `
+    <div class="dw-slot">
+      <div class="dw-slot-head">Channel ${idx + 1}<button class="danger small" data-action="sensor-channel-remove" data-index="${idx}">&times;</button></div>
+      <div class="dw-field"><label>Channel ID</label><input data-template-field="sensor-channel" data-subfield="id" data-index="${idx}" value="${escapeAttr(channel.id || '')}" placeholder="temperature"></div>
+      <div class="dw-field"><label>Name</label><input data-template-field="sensor-channel" data-subfield="name" data-index="${idx}" value="${escapeAttr(channel.name || '')}" placeholder="Temperature"></div>
+      <div class="dw-field"><label>Description</label><input data-template-field="sensor-channel" data-subfield="description" data-index="${idx}" value="${escapeAttr(channel.description || '')}" placeholder="Optional note"></div>
+      <div class="dw-field required"><label>Topic</label><input data-template-field="sensor-channel" data-subfield="topic" data-index="${idx}" value="${escapeAttr(channel.topic || '')}" placeholder="sensors/temp" data-required="true"></div>
+      <div class="dw-field"><label>Units</label><input data-template-field="sensor-channel" data-subfield="units" data-index="${idx}" value="${escapeAttr(channel.units || '')}" placeholder="°C"></div>
+      <div class="dw-field"><label>Decimals</label><input type="number" min="0" max="6" data-template-field="sensor-channel" data-subfield="decimals" data-index="${idx}" value="${channel.decimals || 0}"></div>
+      <div class="dw-field">
+        <label>Parse mode</label>
+        <select data-template-field="sensor-channel" data-subfield="parse_mode" data-index="${idx}">${parseOptions}</select>
+      </div>
+      <div class="dw-field">
+        <label>JSON key</label>
+        <input data-template-field="sensor-channel" data-subfield="json_key" data-index="${idx}" value="${escapeAttr(channel.json_key || '')}" placeholder="value">
+        <div class="dw-hint small">Required when parse mode is JSON.</div>
+      </div>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-channel" data-subfield="display_monitor" data-index="${idx}" ${monitorChecked}>Show card</label>
+      </div>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-channel" data-subfield="history_enabled" data-index="${idx}" ${historyChecked}>Keep history</label>
+      </div>
+      ${renderSensorThreshold(channel.warn, idx, 'warn', 'Warn threshold')}
+      ${renderSensorThreshold(channel.alarm, idx, 'alarm', 'Alarm threshold')}
+    </div>`;
+}
+
+function renderSensorThreshold(threshold, idx, kind, title) {
+  const th = threshold && typeof threshold === 'object' ? threshold : defaultSensorThreshold();
+  const enabled = th.enabled ? 'checked' : '';
+  const compare = th.compare === 'below_or_equal' ? 'below_or_equal' : 'above_or_equal';
+  const disableInputs = '';
+  return `
+    <div class="dw-subsection">
+      <h6>${title}</h6>
+      <div class="dw-field dw-checkbox-field">
+        <label><input type="checkbox" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="enabled" data-index="${idx}" ${enabled}>Enable threshold</label>
+      </div>
+      <div class="dw-field">
+        <label>Compare</label>
+        <select data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="compare" data-index="${idx}">
+          <option value="above_or_equal" ${compare === 'above_or_equal' ? 'selected' : ''}>Value ≥ threshold</option>
+          <option value="below_or_equal" ${compare === 'below_or_equal' ? 'selected' : ''}>Value ≤ threshold</option>
+        </select>
+      </div>
+      <div class="dw-field">
+        <label>Value</label>
+        <input type="number" step="any" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="value" data-index="${idx}" value="${th.value !== undefined ? th.value : ''}" ${disableInputs}>
+      </div>
+      <div class="dw-field">
+        <label>Scenario ID</label>
+        <input data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="scenario" data-index="${idx}" value="${escapeAttr(th.scenario || '')}" placeholder="alarm_scenario" ${disableInputs}>
+      </div>
+      <div class="dw-field">
+        <label>Hysteresis</label>
+        <input type="number" step="any" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="hysteresis" data-index="${idx}" value="${th.hysteresis || 0}">
+      </div>
+      <div class="dw-field">
+        <label>Min duration (ms)</label>
+        <input type="number" min="0" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="min_duration_ms" data-index="${idx}" value="${th.min_duration_ms || 0}">
+      </div>
+      <div class="dw-field">
+        <label>Cooldown (ms)</label>
+        <input type="number" min="0" data-template-field="sensor-channel-threshold" data-kind="${kind}" data-subfield="cooldown_ms" data-index="${idx}" value="${th.cooldown_ms || 0}">
+      </div>
+    </div>`;
+}
+
+function renderSensorParseModeOptions(selected) {
+  const mode = selected === 'json_number' ? 'json_number' : 'raw_number';
+  return `
+    <option value="raw_number" ${mode === 'raw_number' ? 'selected' : ''}>Raw payload</option>
+    <option value="json_number" ${mode === 'json_number' ? 'selected' : ''}>JSON number</option>`;
 }
 
 function renderTopicsSection(dev) {
