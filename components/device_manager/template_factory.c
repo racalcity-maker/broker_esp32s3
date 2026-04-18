@@ -103,6 +103,12 @@ esp_err_t dm_template_factory_build_uid(const dm_uid_template_params_t *params, 
     dm_str_copy(out->data.uid.fail_audio_track,
                 sizeof(out->data.uid.fail_audio_track),
                 params->fail_audio_track);
+    dm_str_copy(out->data.uid.bg_track,
+                sizeof(out->data.uid.bg_track),
+                params->bg_track);
+    dm_str_copy(out->data.uid.bg_start_topic,
+                sizeof(out->data.uid.bg_start_topic),
+                params->bg_start_topic);
 
     return ESP_OK;
 }

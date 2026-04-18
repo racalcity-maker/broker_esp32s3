@@ -39,6 +39,9 @@
 #define SD_PIN_CLK  CONFIG_BROKER_SD_CLK_PIN
 #define SD_PIN_CS   CONFIG_BROKER_SD_CS_PIN
 
+#define AUDIO_FINISHED_POST_RETRIES 5
+#define AUDIO_FINISHED_POST_WAIT_MS 20
+
 #define AUDIO_SAMPLE_RATE 44100
 #define AUDIO_BITS        I2S_DATA_BIT_WIDTH_16BIT
 #define AUDIO_CHANNELS    2
@@ -217,6 +220,28 @@ static void status_set_message(const char *msg)
         s_status.message[0] = 0;
     }
     status_unlock();
+}
+
+static void post_audio_finished(const char *path)
+{
+    if (!path || !path[0]) {
+        return;
+    }
+    event_bus_message_t msg = {0};
+    msg.type = EVENT_AUDIO_FINISHED;
+    strncpy(msg.payload, path, sizeof(msg.payload) - 1);
+    msg.payload[sizeof(msg.payload) - 1] = 0;
+    for (int attempt = 0; attempt < AUDIO_FINISHED_POST_RETRIES; ++attempt) {
+        esp_err_t err = event_bus_post(&msg, pdMS_TO_TICKS(AUDIO_FINISHED_POST_WAIT_MS));
+        if (err == ESP_OK) {
+            return;
+        }
+        if (err != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "audio finished event post failed: %s", esp_err_to_name(err));
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "audio finished event dropped for %s", path);
 }
 
 static void save_volume_to_nvs(uint8_t vol)
@@ -566,6 +591,9 @@ static void reader_task(void *param)
         ESP_LOGE(TAG, "cannot open %s", cmd.path);
         status_set_message("Cannot open file");
         error_monitor_report_audio_fault();
+        if (!s_stop_requested) {
+            post_audio_finished(cmd.path);
+        }
         s_reader_done = true;
         vTaskDelete(NULL);
         return;
@@ -599,6 +627,10 @@ static void reader_task(void *param)
         s_status.paused = false;
         s_status.fmt = to_public_format(fmt);
         s_status.message[0] = 0;
+        if (cmd.path[0]) {
+            strncpy(s_status.path, cmd.path, sizeof(s_status.path) - 1);
+            s_status.path[sizeof(s_status.path) - 1] = 0;
+        }
         status_unlock();
     }
 
@@ -650,6 +682,9 @@ static void reader_task(void *param)
         s_tx_enabled = false;
     }
     status_set_playing(false);
+    if (!s_stop_requested) {
+        post_audio_finished(cmd.path);
+    }
     s_reader_done = true;
     s_reader_task = NULL;
     vTaskDelete(NULL);
@@ -841,6 +876,29 @@ esp_err_t audio_player_play(const char *path)
     cmd.path[sizeof(cmd.path) - 1] = 0;
     cmd.volume = -1; // use current volume
     cmd.seek_ratio = -1.0f;
+    return xQueueSend(s_queue, &cmd, pdMS_TO_TICKS(50)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t audio_player_play_seek(const char *path, float seek_ratio)
+{
+    if (!path) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    audio_cmd_t cmd = {0};
+    strncpy(cmd.path, path, sizeof(cmd.path) - 1);
+    cmd.path[sizeof(cmd.path) - 1] = 0;
+    cmd.volume = -1;
+    if (seek_ratio < 0.0f) {
+        cmd.seek_ratio = -1.0f;
+    } else {
+        if (seek_ratio > 1.0f) {
+            seek_ratio = 1.0f;
+        }
+        cmd.seek_ratio = seek_ratio;
+    }
     return xQueueSend(s_queue, &cmd, pdMS_TO_TICKS(50)) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 

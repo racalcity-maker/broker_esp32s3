@@ -22,6 +22,7 @@
 #include "config_store.h"
 
 static const char *TAG = "template_runtime";
+#define UID_AUDIO_RESUME_TIMEOUT_US (60ULL * 1000ULL * 1000ULL)
 
 typedef struct uid_runtime_entry {
     char device_id[DEVICE_MANAGER_ID_MAX_LEN];
@@ -31,10 +32,12 @@ typedef struct uid_runtime_entry {
     dm_uid_event_type_t last_action_event;
     uint64_t last_action_ts_ms;
     uint64_t last_start_ts_ms;
+    uint64_t last_bg_start_ts_ms;
     char start_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
     char start_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
     char broadcast_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
     char broadcast_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+    char bg_start_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
     struct uid_runtime_entry *next;
 } uid_runtime_entry_t;
 
@@ -81,6 +84,13 @@ typedef struct sequence_runtime_entry {
     struct sequence_runtime_entry *next;
 } sequence_runtime_entry_t;
 
+typedef struct {
+    bool pending;
+    char fail_track[DEVICE_MANAGER_TRACK_NAME_MAX_LEN];
+    char resume_track[DEVICE_MANAGER_TRACK_NAME_MAX_LEN];
+    float resume_ratio;
+} uid_audio_resume_state_t;
+
 static uid_runtime_entry_t *s_uid_entries;
 static signal_runtime_entry_t *s_signal_entries;
 static mqtt_runtime_entry_t *s_mqtt_entries;
@@ -89,6 +99,8 @@ static condition_runtime_entry_t *s_condition_entries;
 static interval_runtime_entry_t *s_interval_entries;
 static sequence_runtime_entry_t *s_sequence_entries;
 static bool s_event_handler_registered = false;
+static uid_audio_resume_state_t s_uid_audio_resume = {0};
+static esp_timer_handle_t s_uid_audio_resume_timer = NULL;
 
 static const char *signal_event_str(dm_signal_event_type_t ev);
 static bool diagnostics_verbose_enabled(void);
@@ -98,6 +110,10 @@ static void signal_timeout_timer_cb(void *arg);
 static void restart_signal_timeout_timer(signal_runtime_entry_t *entry);
 static void stop_signal_timeout_timer(signal_runtime_entry_t *entry);
 static void reset_signal_entry(signal_runtime_entry_t *entry, const char *topic);
+static void uid_audio_resume_clear(void);
+static void uid_audio_resume_timeout_cb(void *arg);
+static void uid_audio_resume_arm(const char *fail_track, const char *bg_track);
+static void uid_audio_resume_handle_finished(const char *path);
 
 static bool payload_to_bool(const char *payload)
 {
@@ -137,6 +153,82 @@ static bool diagnostics_verbose_enabled(void)
     return cfg && cfg->verbose_logging;
 }
 
+static void uid_audio_resume_clear(void)
+{
+    s_uid_audio_resume.pending = false;
+    s_uid_audio_resume.fail_track[0] = '\0';
+    s_uid_audio_resume.resume_track[0] = '\0';
+    s_uid_audio_resume.resume_ratio = -1.0f;
+    if (s_uid_audio_resume_timer) {
+        esp_timer_stop(s_uid_audio_resume_timer);
+    }
+}
+
+static void uid_audio_resume_timeout_cb(void *arg)
+{
+    (void)arg;
+    uid_audio_resume_clear();
+}
+
+static void uid_audio_resume_arm(const char *fail_track, const char *bg_track)
+{
+    uid_audio_resume_clear();
+    if (!fail_track || !fail_track[0] || !bg_track || !bg_track[0]) {
+        return;
+    }
+    audio_player_status_t status = {0};
+    audio_player_get_status(&status);
+    if (!status.playing || status.paused || !status.path[0]) {
+        return;
+    }
+    if (strcmp(status.path, bg_track) != 0) {
+        return;
+    }
+    if (strcmp(status.path, fail_track) == 0) {
+        return;
+    }
+    audio_player_pause();
+    s_uid_audio_resume.pending = true;
+    dm_str_copy(s_uid_audio_resume.fail_track, sizeof(s_uid_audio_resume.fail_track), fail_track);
+    dm_str_copy(s_uid_audio_resume.resume_track, sizeof(s_uid_audio_resume.resume_track), status.path);
+    s_uid_audio_resume.resume_ratio = -1.0f;
+    if (status.dur_ms > 0) {
+        float ratio = (float)status.pos_ms / (float)status.dur_ms;
+        if (ratio < 0.0f) {
+            ratio = 0.0f;
+        } else if (ratio > 1.0f) {
+            ratio = 1.0f;
+        }
+        s_uid_audio_resume.resume_ratio = ratio;
+    }
+    if (s_uid_audio_resume_timer) {
+        esp_timer_stop(s_uid_audio_resume_timer);
+        esp_timer_start_once(s_uid_audio_resume_timer, UID_AUDIO_RESUME_TIMEOUT_US);
+    }
+}
+
+static void uid_audio_resume_handle_finished(const char *path)
+{
+    if (!s_uid_audio_resume.pending) {
+        return;
+    }
+    if (!path || !path[0]) {
+        uid_audio_resume_clear();
+        return;
+    }
+    if (strcmp(path, s_uid_audio_resume.fail_track) != 0) {
+        return;
+    }
+    if (s_uid_audio_resume.resume_track[0]) {
+        if (s_uid_audio_resume.resume_ratio >= 0.0f) {
+            audio_player_play_seek(s_uid_audio_resume.resume_track, s_uid_audio_resume.resume_ratio);
+        } else {
+            audio_player_play(s_uid_audio_resume.resume_track);
+        }
+    }
+    uid_audio_resume_clear();
+}
+
 static void template_event_handler(const event_bus_message_t *msg)
 {
     if (!msg) {
@@ -154,6 +246,9 @@ static void template_event_handler(const event_bus_message_t *msg)
             return;
         }
         dm_template_runtime_handle_flag(msg->topic, payload_to_bool(msg->payload));
+        break;
+    case EVENT_AUDIO_FINISHED:
+        uid_audio_resume_handle_finished(msg->payload);
         break;
     default:
         break;
@@ -355,6 +450,18 @@ esp_err_t dm_template_runtime_init(void)
     free_condition_entries();
     free_interval_entries();
     free_sequence_entries();
+    uid_audio_resume_clear();
+    if (!s_uid_audio_resume_timer) {
+        esp_timer_create_args_t args = {
+            .callback = uid_audio_resume_timeout_cb,
+            .name = "uid_audio_resume",
+        };
+        esp_err_t err = esp_timer_create(&args, &s_uid_audio_resume_timer);
+        if (err != ESP_OK) {
+            s_uid_audio_resume_timer = NULL;
+            ESP_LOGW(TAG, "uid resume timer create failed: %s", esp_err_to_name(err));
+        }
+    }
     if (!s_event_handler_registered) {
         esp_err_t err = event_bus_register_handler(template_event_handler);
         if (err != ESP_OK) {
@@ -391,6 +498,7 @@ static esp_err_t register_uid_runtime(const dm_uid_template_t *tpl, const char *
     dm_str_copy(entry->start_payload, sizeof(entry->start_payload), tpl->start_payload);
     dm_str_copy(entry->broadcast_topic, sizeof(entry->broadcast_topic), tpl->broadcast_topic);
     dm_str_copy(entry->broadcast_payload, sizeof(entry->broadcast_payload), tpl->broadcast_payload);
+    dm_str_copy(entry->bg_start_topic, sizeof(entry->bg_start_topic), tpl->bg_start_topic);
     entry->next = s_uid_entries;
     s_uid_entries = entry;
     ESP_LOGI(TAG, "registered UID runtime for device %s with %zu slots", entry->device_id, entry->topic_count);
@@ -659,6 +767,43 @@ static void reset_uid_entry(uid_runtime_entry_t *entry)
     dm_uid_runtime_reset(&entry->runtime);
 }
 
+static bool handle_uid_bg_start_event(uid_runtime_entry_t *entry, const char *topic)
+{
+    if (!entry || !entry->bg_start_topic[0] || !topic) {
+        return false;
+    }
+    if (strcmp(entry->bg_start_topic, topic) != 0) {
+        return false;
+    }
+    if (!entry->runtime.config.bg_track[0]) {
+        ESP_LOGW(TAG, "[UID] dev=%s bg start topic=%s ignored (no bg track)",
+                 entry->device_id,
+                 topic);
+        return true;
+    }
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    if (entry->last_bg_start_ts_ms > 0) {
+        uint64_t delta = (now_ms > entry->last_bg_start_ts_ms) ? (now_ms - entry->last_bg_start_ts_ms) : 0;
+        if (delta < 300) {
+            ESP_LOGW(TAG,
+                     "[UID] dev=%s bg start topic=%s suppressed (delta %llu ms)",
+                     entry->device_id,
+                     topic,
+                     (unsigned long long)delta);
+            return true;
+        }
+    }
+    entry->last_bg_start_ts_ms = now_ms;
+    uid_audio_resume_clear();
+    ESP_LOGI(TAG,
+             "[UID] dev=%s bg start topic=%s track=%s",
+             entry->device_id,
+             topic,
+             entry->runtime.config.bg_track);
+    audio_player_play(entry->runtime.config.bg_track);
+    return true;
+}
+
 static bool handle_uid_start_event(uid_runtime_entry_t *entry, const char *topic, const char *payload)
 {
     if (!entry || !entry->start_topic[0] || !topic) {
@@ -716,7 +861,7 @@ static void trigger_device_scenario(const char *device_id, const char *scenario_
     }
 }
 
-static void apply_uid_action(const dm_uid_action_t *action)
+static void apply_uid_action(uid_runtime_entry_t *entry, const dm_uid_action_t *action)
 {
     if (!action) {
         return;
@@ -728,6 +873,9 @@ static void apply_uid_action(const dm_uid_action_t *action)
         publish_mqtt_payload(action->signal_topic, action->signal_payload);
     }
     if (action->audio_play && action->audio_track[0]) {
+        if (entry && action->event == DM_UID_EVENT_INVALID) {
+            uid_audio_resume_arm(action->audio_track, entry->runtime.config.bg_track);
+        }
         audio_player_play(action->audio_track);
     }
 }
@@ -757,6 +905,9 @@ static bool handle_uid_message(const char *topic, const char *payload)
     bool handled = false;
     const char *body = payload ? payload : "";
     for (uid_runtime_entry_t *entry = s_uid_entries; entry; entry = entry->next) {
+        if (handle_uid_bg_start_event(entry, topic)) {
+            handled = true;
+        }
         if (handle_uid_start_event(entry, topic, body)) {
             handled = true;
             continue;
@@ -774,7 +925,7 @@ static bool handle_uid_message(const char *topic, const char *payload)
                     ESP_LOGD(TAG, "[UID] dev=%s suppress duplicate event=%s", entry->device_id, uid_event_str(action.event));
                     continue;
                 }
-                apply_uid_action(&action);
+                apply_uid_action(entry, &action);
             }
         }
     }

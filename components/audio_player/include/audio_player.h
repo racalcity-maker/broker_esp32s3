@@ -30,6 +30,7 @@ typedef struct {
 esp_err_t audio_player_init(void);
 esp_err_t audio_player_start(void);
 esp_err_t audio_player_play(const char *path);
+esp_err_t audio_player_play_seek(const char *path, float seek_ratio);
 esp_err_t audio_player_seek(uint32_t pos_ms);
 esp_err_t audio_player_set_volume(int percent);
 esp_err_t audio_player_mount_sd(void);

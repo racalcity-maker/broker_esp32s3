@@ -1,6 +1,7 @@
 set(TEST_SRCS
     "test_runner.c"
-    "../../../components/device_manager/test/test_device_manager_parse.c"
+    "test_device_manager_parse.c"
+    "test_device_manager_integration.c"
 )
 
 idf_component_register(

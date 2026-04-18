@@ -551,12 +551,21 @@ function renderUidTemplate(dev) {
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="uid-action" data-subfield="success_topic" value="${escapeAttr(tpl.success_topic || '')}" placeholder="quest/ok"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="uid-action" data-subfield="success_payload" value="${escapeAttr(tpl.success_payload || '')}" placeholder="payload"></div>
       <div class="dw-field"><label>Audio track</label><input data-template-field="uid-action" data-subfield="success_audio_track" value="${escapeAttr(tpl.success_audio_track || '')}" placeholder="/sdcard/ok.mp3" list="track_lookup"></div>
+      <div class="dw-field"><label>Signal topic</label><input data-template-field="uid-action" data-subfield="success_signal_topic" value="${escapeAttr(tpl.success_signal_topic || '')}" placeholder="relay/cmd"></div>
+      <div class="dw-field"><label>Signal payload</label><input data-template-field="uid-action" data-subfield="success_signal_payload" value="${escapeAttr(tpl.success_signal_payload || '')}" placeholder="ON"></div>
     </div>
     <div class="dw-section">
       <h5>Fail actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="uid-action" data-subfield="fail_topic" value="${escapeAttr(tpl.fail_topic || '')}" placeholder="quest/fail"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="uid-action" data-subfield="fail_payload" value="${escapeAttr(tpl.fail_payload || '')}" placeholder="payload"></div>
       <div class="dw-field"><label>Audio track</label><input data-template-field="uid-action" data-subfield="fail_audio_track" value="${escapeAttr(tpl.fail_audio_track || '')}" placeholder="/sdcard/fail.mp3" list="track_lookup"></div>
+      <div class="dw-field"><label>Signal topic</label><input data-template-field="uid-action" data-subfield="fail_signal_topic" value="${escapeAttr(tpl.fail_signal_topic || '')}" placeholder="relay/cmd"></div>
+      <div class="dw-field"><label>Signal payload</label><input data-template-field="uid-action" data-subfield="fail_signal_payload" value="${escapeAttr(tpl.fail_signal_payload || '')}" placeholder="OFF"></div>
+    </div>
+    <div class="dw-section">
+      <h5>Background track</h5>
+      <div class="dw-field"><label>Start topic</label><input data-template-field="uid-action" data-subfield="bg_start_topic" value="${escapeAttr(tpl.bg_start_topic || '')}" placeholder="quest/bg/start"></div>
+      <div class="dw-field"><label>Track</label><input data-template-field="uid-action" data-subfield="bg_track" value="${escapeAttr(tpl.bg_track || '')}" placeholder="/sdcard/bg.mp3" list="track_lookup"></div>
     </div>`;
 }
 
@@ -1363,9 +1372,15 @@ function defaultUidTemplate() {
     success_topic: '',
     success_payload: '',
     success_audio_track: '',
+    success_signal_topic: '',
+    success_signal_payload: '',
     fail_topic: '',
     fail_payload: '',
     fail_audio_track: '',
+    fail_signal_topic: '',
+    fail_signal_payload: '',
+    bg_start_topic: '',
+    bg_track: '',
   };
 }
 
@@ -1447,7 +1462,7 @@ function ensureUidTemplate(dev) {
       slot.values = [];
     }
   });
-  ['success_topic','success_payload','success_audio_track','fail_topic','fail_payload','fail_audio_track'].forEach((key) => {
+  ['success_topic','success_payload','success_audio_track','success_signal_topic','success_signal_payload','fail_topic','fail_payload','fail_audio_track','fail_signal_topic','fail_signal_payload','bg_start_topic','bg_track'].forEach((key) => {
     if (typeof tpl[key] !== 'string') {
       tpl[key] = '';
     }

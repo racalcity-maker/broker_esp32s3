@@ -31,6 +31,8 @@ typedef struct {
 
     const char *success_audio_track;
     const char *fail_audio_track;
+    const char *bg_track;
+    const char *bg_start_topic;
 
     const char *success_signal_topic;
     const char *success_signal_payload;

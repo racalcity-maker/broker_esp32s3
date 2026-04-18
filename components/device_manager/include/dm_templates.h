@@ -40,6 +40,8 @@ typedef struct {
 
     char success_audio_track[DEVICE_MANAGER_TRACK_NAME_MAX_LEN];
     char fail_audio_track[DEVICE_MANAGER_TRACK_NAME_MAX_LEN];
+    char bg_track[DEVICE_MANAGER_TRACK_NAME_MAX_LEN];
+    char bg_start_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
 
     char success_signal_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
     char success_signal_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
