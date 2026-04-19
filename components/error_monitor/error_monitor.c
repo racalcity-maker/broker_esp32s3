@@ -1,6 +1,7 @@
 #include "error_monitor.h"
 
 #include "status_led.h"
+#include "event_bus.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
@@ -11,6 +12,33 @@ static SemaphoreHandle_t s_lock = NULL;
 static bool s_wifi_ok = false;
 static bool s_sd_present = false;
 static bool s_sd_fault = false;
+
+static void update_led_locked(void);
+
+static void on_event(const event_bus_message_t *msg)
+{
+    if (!msg || !s_lock) {
+        return;
+    }
+    switch (msg->type) {
+    case EVENT_CARD_OK:
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_sd_present = true;
+        s_sd_fault = false;
+        update_led_locked();
+        xSemaphoreGive(s_lock);
+        break;
+    case EVENT_CARD_BAD:
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_sd_present = false;
+        s_sd_fault = true;
+        update_led_locked();
+        xSemaphoreGive(s_lock);
+        break;
+    default:
+        break;
+    }
+}
 
 static void update_led_locked(void)
 {
@@ -34,6 +62,7 @@ esp_err_t error_monitor_init(void)
         }
     }
     ESP_RETURN_ON_ERROR(status_led_init(), TAG, "led init");
+    ESP_RETURN_ON_ERROR(event_bus_register_handler(on_event), TAG, "event reg");
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_wifi_ok = false;
     s_sd_present = false;
@@ -55,26 +84,13 @@ void error_monitor_set_wifi_connected(bool connected)
     xSemaphoreGive(s_lock);
 }
 
-void error_monitor_set_sd_state(bool mounted)
-{
-    if (!s_lock) {
-        return;
-    }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_sd_present = mounted;
-    if (mounted) {
-        s_sd_fault = false;
-    }
-    update_led_locked();
-    xSemaphoreGive(s_lock);
-}
-
 void error_monitor_report_sd_fault(void)
 {
     if (!s_lock) {
         return;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_sd_present = false;
     s_sd_fault = true;
     update_led_locked();
     xSemaphoreGive(s_lock);

@@ -17,8 +17,6 @@
 
 #include "config_store.h"
 #include "event_bus.h"
-#include "automation_engine.h"
-#include "dm_template_runtime.h"
 
 // Минимальный MQTT 3.1.1 брокер: QoS0/1, retain, LWT, простая ACL (prefix-based), без QoS2/username/password/TLS.
 

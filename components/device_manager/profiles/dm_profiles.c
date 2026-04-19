@@ -13,9 +13,10 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 
-#include "device_manager_utils.h"
+#include "device_model_utils.h"
+#include "sd_storage.h"
 
-#define DM_PROFILE_STORAGE_DIR "/sdcard/.dm_profiles"
+#define DM_PROFILE_STORAGE_DIR SD_STORAGE_ROOT_PATH "/.dm_profiles"
 #define DM_PROFILE_STORAGE_EXT ".bin"
 #define DM_PROFILE_MAGIC       0x44504647u
 #define DM_PROFILE_VERSION     3u
@@ -33,6 +34,11 @@ static const char *TAG = "dm_profiles";
 // Ensure SD card directory exists for profile binaries.
 static esp_err_t ensure_storage_dir(void)
 {
+    esp_err_t mount_err = sd_storage_mount();
+    if (mount_err != ESP_OK) {
+        ESP_LOGE(TAG, "sd mount failed before profile dir check: %s", esp_err_to_name(mount_err));
+        return mount_err;
+    }
     struct stat st = {0};
     if (stat(DM_PROFILE_STORAGE_DIR, &st) == 0) {
         if (S_ISDIR(st.st_mode)) {
@@ -237,6 +243,13 @@ static esp_err_t read_devices(const char *id,
     if (err != ESP_OK) {
         return err;
     }
+    err = sd_storage_mount();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "sd mount failed before profile read %s: %s", path, esp_err_to_name(err));
+        *out_count = 0;
+        memset(devices, 0, sizeof(device_descriptor_t) * capacity);
+        return err;
+    }
     FILE *fp = fopen(path, "rb");
     if (!fp) {
         ESP_LOGW(TAG, "profile %s missing", path);
@@ -423,6 +436,10 @@ esp_err_t dm_profiles_delete_profile_file(const char *profile_id)
     if (err != ESP_OK) {
         return err;
     }
+    err = sd_storage_mount();
+    if (err != ESP_OK) {
+        return err;
+    }
     if (unlink(path) != 0) {
         if (errno == ENOENT) {
             return ESP_OK;
@@ -445,6 +462,10 @@ esp_err_t dm_profiles_export_raw(const char *profile_id, uint8_t **out_data, siz
     }
     char path[DM_PROFILE_PATH_MAX];
     esp_err_t err = make_profile_path(profile_id, path, sizeof(path));
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = sd_storage_mount();
     if (err != ESP_OK) {
         return err;
     }

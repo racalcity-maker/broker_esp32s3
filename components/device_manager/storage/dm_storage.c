@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 
 #include "device_manager.h"
+#include "sd_storage.h"
 
 static const char *TAG = "dm_storage";
 
@@ -14,6 +15,11 @@ esp_err_t dm_storage_load(const char *path, device_manager_config_t *cfg)
 {
     if (!path || !cfg) {
         return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t mount_err = sd_storage_mount();
+    if (mount_err != ESP_OK) {
+        ESP_LOGW(TAG, "sd mount failed before load %s: %s", path, esp_err_to_name(mount_err));
+        return mount_err;
     }
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -51,6 +57,11 @@ esp_err_t dm_storage_save(const char *path, const device_manager_config_t *cfg)
 {
     if (!path || !cfg) {
         return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t mount_err = sd_storage_mount();
+    if (mount_err != ESP_OK) {
+        ESP_LOGE(TAG, "sd mount failed before save %s: %s", path, esp_err_to_name(mount_err));
+        return mount_err;
     }
     char *json = NULL;
     size_t len = 0;

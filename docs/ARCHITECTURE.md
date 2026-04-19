@@ -2,117 +2,462 @@
 
 ## Overview
 
-The firmware turns an ESP32-S3 with PSRAM + SD card into a stand‑alone automation hub.  
-It embeds a Wi‑Fi manager, MQTT broker, device manager with templates, automation
-engine, audio player, and Web UI. The system keeps the *active* configuration in
-PSRAM, persists backups/profiles on SD, and exposes REST/MQTT interfaces so room
-hardware can interact without an external server.
+`Broker` is an ESP32-S3 based standalone automation hub. It combines:
 
-### High-level data flow
+- Wi-Fi networking
+- a built-in MQTT broker
+- a Web UI with authentication
+- a device configuration system with profiles and templates
+- a template runtime
+- a scenario automation engine
+- an audio playback service
+- OTA firmware update support
 
-```mermaid
-flowchart LR
-    subgraph Web[Web UI / REST]
-        UI[Single-page UI]
-    end
+The firmware is organized as a layered modular system. The main goal of the current architecture is to keep ownership clear:
 
-    subgraph Config[Config Store]
-        NVS[NVS<br/>Wi-Fi + MQTT + credentials]
-        SD[SD card<br/>profiles & backups]
-    end
+- one owner for SD card access
+- one owner for audio playback
+- one owner for device configuration
+- one owner for template runtime state
+- one owner for scenario orchestration
 
-    subgraph Core[Runtime Core]
-        DM[Device Manager<br/>profiles/templates]
-        TR[Template Runtime<br/>UID, signal, timers]
-        AE[Automation Engine<br/>workers + queue]
-        AP[Audio Player<br/>I2S output]
-        EB[Event Bus]
-    end
+## Layered View
 
-    subgraph IO[External IO]
-        MQTT[Built-in MQTT Broker]
-        WiFi[Wi-Fi STA/AP]
-        HW[RFID, lasers, relays]
-        Audio[Speakers]
-        LED[Status LED]
-    end
+### 1. Infrastructure
 
-    UI -->|/api/devices.*| DM
-    UI -->|/api/config/*| NVS
-    UI -->|auth/login| NVS
-    DM -->|profiles| SD
-    DM --> TR --> AE --> EB
-    AE --> AP --> Audio
-    AE --> MQTT
-    EB <--> MQTT
-    WiFi --> MQTT
-    HW -->|MQTT publish| MQTT
-    MQTT -->|EVENT_MQTT_MESSAGE| EB
-    EB --> TR
-    WiFi --> LED
-```
-
-## Subsystems
+These components provide shared low-level services and do not contain product-specific business logic.
 
 | Component | Location | Responsibility |
 |-----------|----------|----------------|
-| `network` | `components/network` | Handles STA/AP bring-up, captive portal SSID, DHCP, reconnect loops, pushes Wi-Fi state into `error_monitor`. |
-| `config_store` | `components/config_store` | Loads/saves Wi-Fi, MQTT, time and Web credentials in NVS. Provides hashing for Web passwords and bounds for MQTT users (16 entries). |
-| `status_led` + `error_monitor` | `components/status_led`, `components/error_monitor` | Drives WS2812 on GPIO 48. Blink red = SD fault/missing, solid red = Wi-Fi down, soft green = Wi-Fi + SD OK. |
-| `web_ui` | `components/web_ui` | HTTP server + asset loader. Serves the SPA, REST API, handles login (cookie session), MQTT credential editing, device config import/export, SD browser. |
-| `device_manager` | `components/device_manager` | Core config model (profiles, tabs, topics, scenarios, templates). Refactored into `*_core/parse/validate/export` units. Persists every profile to `/sdcard/.dm_profiles`. |
-| `template_runtime` | `components/device_manager/template_runtime.c` | Registers runtime state per template (UID validator, signal hold, on_mqtt_event, on_flag, if_condition, interval_task, etc.), feeds automation triggers. |
-| `automation_engine` | `components/automation_engine` | Queue + worker tasks. Executes scenario steps (`mqtt_publish`, `audio_play`, `set_flag`, `wait_flags`, `delay`, `event_bus`, loops). |
-| `audio_player` | `components/audio_player` | Handles SD track lookup, mp3/wav decode (Helix), I2S playback, pause/seek, amplifier GPIO, integrates with automation. |
-| `mqtt_core` | `components/mqtt_core` | Lightweight MQTT 3.1.1 broker (QoS 0/1, retain, will). Enforces ACL per client, authenticates with credentials from config, bridges automation events. Supports 16 simultaneous clients. |
-| `event_bus` | `components/event_bus` | Internal publish/subscribe bus linking MQTT, automation, templates, and status endpoints. |
-| `main` | `main/` | Bootstraps IDF, initializes subsystems, handles Wi-Fi provisioning, kicks automation + audio + device manager. |
+| `event_bus` | `components/event_bus` | Internal asynchronous message delivery between modules. |
+| `config_store` | `components/config_store` | Stores Wi-Fi, MQTT, time and Web credentials in NVS. |
+| `sd_storage` | `components/sd_storage` | Single owner of SD mount/state/info/root path. |
+| `status_led` | `components/status_led` | WS2812 LED control and patterns. |
+| `ota_manager` | `components/ota_manager` | OTA upload, partition state, rollback-aware status. |
 
-## Configuration lifecycle
+### 2. Platform Services
 
-1. `app_main` initializes `nvs_flash`, `config_store`, SD card, and the device manager.
-2. Active profile is loaded from `/sdcard/.dm_profiles/<id>.bin` into PSRAM.
-3. `device_manager` registers all templates via `template_runtime`.
-4. Web UI `/api/devices/config` exposes the JSON; `/api/devices/apply` validates and writes back to SD.
-5. Profiles not in use stay serialized on SD (reloading them swaps into PSRAM without reboot).
+These components own hardware-facing runtime services.
 
-## Automation flow
+| Component | Location | Responsibility |
+|-----------|----------|----------------|
+| `network` | `components/network` | STA/AP lifecycle, IP acquisition, mDNS, NTP. |
+| `mqtt_core` | `components/mqtt_core` | Embedded MQTT broker, publish/inject path, session stats. |
+| `audio_player` | `components/audio_player` | Audio playback service, decode pipeline, I2S output, status, volume. |
+| `error_monitor` | `components/error_monitor` | Aggregates health state and drives LED indication. |
 
-1. External hardware publishes into MQTT broker (e.g., UID readers, heartbeat sensors).
-2. `mqtt_core` authenticates client → ACL check → injects into `event_bus`.
-3. `template_runtime` subscribes to relevant events (topic, flag, timers) and triggers automation scenarios.
-4. `automation_engine` pushes steps to worker queue. Workers call `mqtt_publish`, `audio_play`, `set_flag`, etc.
-5. Audio steps hit `audio_player`, MQTT steps go back to broker, flag steps mutate template state.
+### 3. Domain Model
 
-## Authentication & recovery
+This layer holds shared data structures and template metadata.
 
-- **Web UI**: Username/password stored in NVS (hashed). Cookie-based sessions with `broker_sid`.
-- **MQTT**: Up to 16 `(client_id, username, password)` slots. Each mapped to `mqtt_core` ACL to restrict topics.
-- **Reset**: GPIO defined in menuconfig resets Web auth + MQTT user table when pulled low for ~10 s; log prints
-  `web auth reset pin triggered`.
+| Component | Location | Responsibility |
+|-----------|----------|----------------|
+| `device_model` | `components/device_model` | Shared device types, template types, limits, template registry/factory, common helpers. |
 
-## Build & test in CI
+### 4. Domain Services
 
-GitHub Actions workflow `.github/workflows/ci.yml` performs:
+These components implement broker-specific business logic.
 
-1. Checkout + Python setup.
-2. Installs ESP-IDF v5.3.3 (cached between runs).
-3. Builds main firmware (`idf.py build`).
-4. Builds `tests/device_manager` Unity test app (parses JSON limits, templates).
-5. Uploads `.bin/.elf` artifacts.
+| Component | Location | Responsibility |
+|-----------|----------|----------------|
+| `device_manager` | `components/device_manager` | Active config, parsing, validation, profiles, storage, JSON import/export. |
+| `device_runtime` | `components/device_runtime` | Runtime state for templates and template-driven reactions. |
+| `automation_engine` | `components/automation_engine` | Scenario trigger registry, workers, execution queue, flag/context handling. |
 
-Run the same locally:
+### 5. Presentation
 
-```bash
-idf.py set-target esp32s3
-idf.py build
+| Component | Location | Responsibility |
+|-----------|----------|----------------|
+| `web_ui` | `components/web_ui` | HTTP server, login/session handling, REST API, embedded SPA assets. |
 
-cd tests/device_manager
-idf.py set-target esp32s3
-idf.py build
+## High-Level Data Flow
+
+```mermaid
+flowchart LR
+    subgraph UI[Presentation]
+        WEB[Web UI]
+    end
+
+    subgraph Infra[Infrastructure]
+        NVS[config_store]
+        BUS[event_bus]
+        SD[sd_storage]
+        OTA[ota_manager]
+    end
+
+    subgraph Domain[Domain Services]
+        DM[device_manager]
+        DR[device_runtime]
+        AE[automation_engine]
+        MODEL[device_model]
+    end
+
+    subgraph Platform[Platform Services]
+        NET[network]
+        MQTT[mqtt_core]
+        AUDIO[audio_player]
+        ERR[error_monitor]
+    end
+
+    WEB --> DM
+    WEB --> NVS
+    WEB --> AUDIO
+    WEB --> OTA
+    WEB --> SD
+
+    DM --> SD
+    DM --> DR
+    DM --> MODEL
+
+    DR --> MODEL
+    DR --> MQTT
+    DR --> AUDIO
+    DR --> BUS
+
+    AE --> DM
+    AE --> MODEL
+    AE --> MQTT
+    AE --> AUDIO
+    AE --> BUS
+
+    MQTT --> BUS
+    SD --> BUS
+    BUS --> ERR
+    NET --> ERR
 ```
 
-## Future diagram targets
+## Ownership and Boundaries
 
-- Extend the Mermaid graph with scenario flows or network topology if you add remote MQTT relays.
-- Export as PNG/SVG via VSCode or GitHub’s new diagram rendering when sharing outside the repo.
+### SD Card
+
+Owner:
+
+- `components/sd_storage`
+
+Rules:
+
+- no other component owns mount state
+- no other component should implement its own SD lifecycle
+- consumers ask `sd_storage` for mount/info/root path only
+
+Current users:
+
+- `audio_player`
+- `web_ui`
+- `device_manager`
+
+Important:
+
+- `sd_storage` no longer depends on `error_monitor`
+- SD status is propagated through `event_bus` using `EVENT_CARD_OK` and `EVENT_CARD_BAD`
+
+### Audio
+
+Owner:
+
+- `components/audio_player`
+
+Public responsibility:
+
+- play/stop/pause/resume/seek
+- volume handling
+- playback status
+
+Internal structure:
+
+- `audio_player.c` - orchestration/public API
+- `audio_player_decode.c` - reader/decode pipeline
+- `audio_player_output.c` - I2S/output
+- `audio_player_status.c` - playback status
+- `audio_player_volume.c` - volume + NVS persistence
+
+Rule:
+
+- UI and automation should use `audio_player` as a service
+- audio control should not be implemented through SD or ad-hoc event logic
+
+### Device Configuration
+
+Owner:
+
+- `components/device_manager`
+
+Public responsibility:
+
+- initialize and hold active config
+- lock/unlock access to config
+- import/export JSON
+- manage profiles
+- persist snapshots
+
+Important boundary:
+
+- `device_manager` is no longer the owner of runtime template execution
+- runtime logic moved to `device_runtime`
+
+### Shared Device Types
+
+Owner:
+
+- `components/device_model`
+
+Contains:
+
+- device config types
+- scenario step types
+- template config types
+- template registry/factory
+- common limits and copy helpers
+
+Rule:
+
+- shared device and template types go here, not into `device_manager`
+
+### Template Runtime
+
+Owner:
+
+- `components/device_runtime`
+
+Public responsibility:
+
+- initialize runtime service
+- rebuild runtime from active config
+- expose runtime snapshot API where needed
+
+Internal responsibility:
+
+- UID validator runtime
+- signal hold runtime
+- MQTT trigger runtime
+- flag trigger runtime
+- condition runtime
+- interval runtime
+- sequence runtime
+
+Important boundary:
+
+- `device_runtime` no longer calls `automation_engine` directly
+- scenario triggers are passed through `event_bus` using `EVENT_SCENARIO_TRIGGER`
+
+### Scenario Automation
+
+Owner:
+
+- `components/automation_engine`
+
+Responsibility:
+
+- build trigger registry from active config
+- maintain flag/context state
+- queue scenario jobs
+- execute scenario steps
+
+Important dependencies:
+
+- reads active config from `device_manager`
+- uses shared types from `device_model`
+- performs side effects through `mqtt_core`, `audio_player` and `event_bus`
+
+### Web UI
+
+Owner:
+
+- `components/web_ui`
+
+Responsibility:
+
+- HTTP server
+- login/session handling
+- REST routes
+- embedded assets
+
+Rule:
+
+- `web_ui` is a presentation layer
+- it should use public service APIs from other components
+- internal headers from other components should not leak into Web UI logic
+
+## Runtime Lifecycle
+
+### Boot Sequence
+
+`main/main.c` performs the system startup in this order:
+
+1. `nvs_flash`
+2. `ota_manager`
+3. `config_store`
+4. `event_bus`
+5. `error_monitor`
+6. `network`
+7. `mqtt_core`
+8. `audio_player`
+9. `web_ui`
+10. background bootstrap of `device_manager`
+11. start `automation_engine`
+
+### Device Manager Bootstrap
+
+`device_manager`:
+
+1. allocates active config in PSRAM
+2. loads backup/profile data from SD
+3. syncs active profile
+4. initializes `device_runtime`
+5. rebuilds runtime from the active config
+
+### OTA Lifecycle
+
+`ota_manager`:
+
+1. initializes OTA state early at boot
+2. reports current boot/running partition
+3. receives upload from Web UI
+4. finalizes image
+5. marks reboot as required, but does not reboot by itself
+6. after explicit reboot into the new image, waits for healthy startup
+7. after healthy startup, system is marked ready for confirm
+
+`/api/ota/status` and `/api/status -> ota` expose `ota.phase` as the main lifecycle field.
+
+Current phases:
+
+- `idle`: no OTA action is active
+- `uploading`: image upload/write is in progress
+- `reboot_required`: image installed, explicit reboot is required
+- `rebooting`: reboot was requested and restart task is already scheduled
+- `verify_wait_ready`: device booted into a rollback-capable image and is waiting for `ota_manager_notify_system_ready()`
+- `verify_pending`: system is ready and OTA confirm is pending
+
+Compatibility note:
+
+- legacy boolean fields such as `in_progress`, `pending_verify`, `system_ready`, and `reboot_required` are still exposed
+- new UI logic should treat `ota.phase` as the canonical lifecycle state
+
+## Event-Based Integration
+
+The event bus is used as the decoupling boundary between services.
+
+Important events:
+
+- `EVENT_MQTT_MESSAGE`
+- `EVENT_FLAG_CHANGED`
+- `EVENT_DEVICE_CONFIG_CHANGED`
+- `EVENT_SCENARIO_TRIGGER`
+- `EVENT_CARD_OK`
+- `EVENT_CARD_BAD`
+- `EVENT_AUDIO_FINISHED`
+
+Examples:
+
+- `mqtt_core` injects MQTT input into `event_bus`
+- `device_runtime` reacts to MQTT/flags and posts `EVENT_SCENARIO_TRIGGER`
+- `automation_engine` listens for scenario trigger and config-change events
+- `sd_storage` reports SD mount status through card events
+- `error_monitor` listens to card events instead of being called directly by storage
+
+## Public APIs
+
+After refactoring, public API surfaces were narrowed.
+
+### `device_manager`
+
+Public header:
+
+- `components/device_manager/include/device_manager.h`
+
+Public scope:
+
+- config lifecycle
+- profile lifecycle
+- JSON import/export
+- raw profile export
+
+Internal-only helpers are no longer exposed through `include/`.
+
+### `device_runtime`
+
+Public headers:
+
+- `components/device_runtime/include/dm_runtime_service.h`
+- `components/device_runtime/include/dm_template_runtime.h`
+
+Low-level runtime implementation headers are private to the component.
+
+### `web_ui`
+
+Public header:
+
+- `components/web_ui/include/web_ui.h`
+
+Internal HTTP/auth/page/helper headers are private to `web_ui`.
+
+### `automation_engine`
+
+Public header:
+
+- `components/automation_engine/include/automation_engine.h`
+
+Only external control operations remain public. Internal reload/MQTT handling functions are now private.
+
+## Current Architecture Strengths
+
+- clear SD ownership
+- clear split between config and runtime
+- shared model isolated into `device_model`
+- `web_ui`, `automation_engine`, and `audio_player` split into smaller modules
+- fewer hidden compile-time dependencies
+- narrower public headers
+- less direct cross-layer calling
+
+## Known Remaining Tradeoffs
+
+These are no longer hidden problems, but they are still deliberate tradeoffs:
+
+1. `dm_template_runtime.h` is still a public read-model style API.
+   - Used for runtime snapshot visibility.
+   - Acceptable, but it means runtime observability is exposed as a service.
+
+2. `device_manager` still combines multiple responsibilities.
+   - config lifecycle
+   - profile management
+   - persistence
+   - export/import
+   - This is manageable now, but could be split further later.
+
+3. `error_monitor_report_sd_fault()` still exists.
+   - This is not a dependency from `sd_storage`.
+   - It is kept for local fault reporting from other services such as `audio_player`.
+
+## Rules for Future Changes
+
+To keep the architecture stable:
+
+1. Put shared device/template types only into `device_model`.
+2. Keep component-internal headers out of `include/`.
+3. Do not let `sd_storage` call monitoring/UI modules directly.
+4. Do not let `device_runtime` call `automation_engine` directly.
+5. Use `event_bus` for inter-service signaling where ownership would otherwise blur.
+6. Keep `web_ui` as a presentation layer, not a second orchestration layer.
+
+## Repository Map
+
+```text
+components/
+  audio_player/        Audio playback service
+  automation_engine/   Scenario orchestration
+  config_store/        NVS-backed app config
+  device_manager/      Active config, profiles, storage, export/import
+  device_model/        Shared device/template types and registry
+  device_runtime/      Template runtime execution/state
+  error_monitor/       Health aggregation and LED policy
+  event_bus/           Internal event transport
+  mqtt_core/           Embedded MQTT broker
+  network/             Wi-Fi/AP/STA service
+  ota_manager/         OTA upload and status
+  sd_storage/          SD ownership and card state
+  status_led/          WS2812 patterns
+  web_ui/              HTTP server and SPA API
+main/
+  main.c               System bootstrap
+```

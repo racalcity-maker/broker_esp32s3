@@ -18,12 +18,13 @@
 
 #include "dm_profiles.h"
 #include "dm_storage.h"
-#include "device_manager_utils.h"
-#include "dm_template_runtime.h"
+#include "dm_runtime_service.h"
+#include "device_model_utils.h"
 #include "device_manager_internal.h"
+#include "sd_storage.h"
 
 static const char *TAG = "device_manager";
-static const char *CONFIG_BACKUP_PATH = "/sdcard/brocker_devices.json";
+static const char *CONFIG_BACKUP_PATH = SD_STORAGE_ROOT_PATH "/brocker_devices.json";
 
 #define DM_DEVICE_MAX            DEVICE_MANAGER_MAX_DEVICES
 #define DM_SCENARIO_MAX          DEVICE_MANAGER_MAX_SCENARIOS_PER_DEVICE
@@ -155,11 +156,6 @@ static void dm_cjson_free(void *ptr)
     }
 }
 
-static void register_templates_from_config(device_manager_config_t *cfg);
-
-
-
-
 // Global device-manager lock; poll with timeout so we can feed WDT while waiting.
 static void dm_lock(void)
 {
@@ -175,28 +171,6 @@ static void dm_unlock(void)
     if (s_lock) {
         xSemaphoreGive(s_lock);
     }
-}
-
-// Recreate runtime instances for every template in the active config.
-static void register_templates_from_config(device_manager_config_t *cfg)
-{
-    if (!cfg) {
-        return;
-    }
-    ESP_LOGI(TAG, "register_templates_from_config: resetting runtime");
-    dm_template_runtime_reset();
-    uint8_t limit = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
-    for (uint8_t i = 0; i < cfg->device_count && i < limit; ++i) {
-        device_descriptor_t *dev = &cfg->devices[i];
-        if (dev->template_assigned) {
-            ESP_LOGI(TAG, "registering template for %s (type=%d)", dev->id, dev->template_config.type);
-            esp_err_t err = dm_template_runtime_register(&dev->template_config, dev->id);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "template runtime register failed for %s: %s", dev->id, esp_err_to_name(err));
-            }
-        }
-    }
-    ESP_LOGI(TAG, "register_templates_from_config: done");
 }
 
 esp_err_t device_manager_init(void)
@@ -252,12 +226,16 @@ esp_err_t device_manager_init(void)
     dm_profiles_sync_from_active(s_config, true);
     dm_profiles_sync_to_active(s_config);
     s_config_ready = true;
-    esp_err_t rt_err = dm_template_runtime_init();
+    esp_err_t rt_err = dm_runtime_service_init();
     if (rt_err != ESP_OK) {
         ESP_LOGE(TAG, "template runtime init failed: %s", esp_err_to_name(rt_err));
         return rt_err;
     }
-    register_templates_from_config(s_config);
+    rt_err = dm_runtime_service_rebuild(s_config);
+    if (rt_err != ESP_OK) {
+        ESP_LOGE(TAG, "template runtime rebuild failed: %s", esp_err_to_name(rt_err));
+        return rt_err;
+    }
     ESP_LOGI(TAG, "device_manager_init finished successfully");
     for (int i = 0; i < DM_BOOT_RETRY_COUNT; ++i) {
         feed_wdt();
@@ -304,7 +282,10 @@ esp_err_t device_manager_reload_from_nvs(void)
     feed_wdt();
     dm_unlock();
     dm_config_free(temp);
-    register_templates_from_config(s_config);
+    err = dm_runtime_service_rebuild(s_config);
+    if (err != ESP_OK) {
+        return err;
+    }
     return ESP_OK;
 }
 
@@ -362,7 +343,11 @@ esp_err_t device_manager_apply(const device_manager_config_t *next)
     dm_unlock();
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "device_manager_apply: config persisted, re-registering templates");
-        register_templates_from_config(s_config);
+        err = dm_runtime_service_rebuild(s_config);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "device_manager_apply: runtime rebuild failed: %s", esp_err_to_name(err));
+            return err;
+        }
         event_bus_message_t msg = {
             .type = EVENT_DEVICE_CONFIG_CHANGED,
         };
@@ -431,6 +416,23 @@ esp_err_t device_manager_export_profile_json(const char *profile_id, char **out_
     esp_err_t err = dm_storage_export_json(snapshot, out_json, out_len);
     dm_config_free(snapshot);
     return err;
+}
+
+esp_err_t device_manager_export_profile_raw(const char *profile_id, uint8_t **out_data, size_t *out_size)
+{
+    const char *id = (profile_id && profile_id[0]) ? profile_id : NULL;
+    char active_id[DEVICE_MANAGER_ID_MAX_LEN] = {0};
+    if (!id) {
+        const device_manager_config_t *cfg = device_manager_lock_config();
+        if (cfg) {
+            if (cfg->active_profile[0]) {
+                dm_str_copy(active_id, sizeof(active_id), cfg->active_profile);
+            }
+            device_manager_unlock_config();
+        }
+        id = active_id[0] ? active_id : DM_DEFAULT_PROFILE_ID;
+    }
+    return dm_profiles_export_raw(id, out_data, out_size);
 }
 
 // Parse JSON and replace either active profile or the supplied profile id.
@@ -609,13 +611,22 @@ esp_err_t device_manager_profile_activate(const char *id)
     esp_err_t err = persist_locked();
     dm_unlock();
     if (err == ESP_OK) {
-        register_templates_from_config(s_config);
+        err = dm_runtime_service_rebuild(s_config);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "device_manager_profile_activate: runtime rebuild failed: %s", esp_err_to_name(err));
+            return err;
+        }
         event_bus_message_t msg = {
             .type = EVENT_DEVICE_CONFIG_CHANGED,
         };
         event_bus_post(&msg, 0);
     }
     return err;
+}
+
+const char *device_manager_default_profile_id(void)
+{
+    return DM_DEFAULT_PROFILE_ID;
 }
 
 // Convenience wrapper for updating active profile via JSON blob.

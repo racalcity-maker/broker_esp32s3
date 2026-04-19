@@ -31,12 +31,19 @@ idf_component_register(
         "web_ui_utils.c"
         "web_ui_devices.c"
         "web_ui_page.c"
+        "web_ui_auth.c"
+        "web_ui_status.c"
+        "web_ui_ota.c"
+        "web_ui_media.c"
+        "web_ui_system.c"
+        "web_ui_devices_api.c"
         "web_ui.c"
     INCLUDE_DIRS "include"
+    PRIV_INCLUDE_DIRS "."
     EMBED_TXTFILES
         "assets/devices_wizard.css"
         ${GENERATED_WIZARD_JS}
-    REQUIRES esp_http_server event_bus config_store network audio_player mqtt_core device_manager automation_engine
+    REQUIRES esp_http_server event_bus config_store network audio_player mqtt_core device_manager device_runtime automation_engine ota_manager sd_storage service_status
 )
 
 if(TARGET devices_wizard_bundle)

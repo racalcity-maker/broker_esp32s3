@@ -1,249 +1,256 @@
 # Broker Firmware
 
-Firmware for the “Broker” controller: an ESP32-S3 based automation hub that embeds its own MQTT server, device manager, web user interface, and audio/MQTT action engine for escape rooms or interactive exhibits.
+Firmware for the `Broker` controller: an ESP32-S3 based automation hub with:
 
----
+- built-in MQTT broker
+- Web UI with authentication
+- profile-based device configuration
+- template runtime
+- scenario automation engine
+- audio playback
+- OTA firmware update
 
-## Feature Highlights
+The firmware is designed for stand-alone escape room and interactive exhibit setups where the ESP32 acts as both the control plane and the local integration point for field devices.
 
-- **Self-hosted MQTT broker** with QoS0/1, retain messages, last-will support, static ACL table, and a lightweight event bus bridge. Devices connect directly to the ESP32 over Wi-Fi.
-- **Web UI** (Status, Audio, Devices, Settings) served from the firmware. Includes a form-based “Simple editor” plus a wizard for creating devices/templates without touching JSON.
-- **Device manager & templates** that live on PSRAM, while profiles and backups persist on SD card. Templates include UID validators, laser hold timers, MQTT/flag triggers, interval tasks, and the new sequence lock for ordered MQTT puzzles.
-- **Automation engine** capable of MQTT publish, audio play/stop, flag waits, loops, delays, and event bus steps. Multiple worker tasks prevent a single scenario from blocking the rest.
-- **Audio subsystem** (I2S) for track playback, pause/resume, loop, and synchronization with scenarios.
-- **Documentation** in `docs/` describing device/template setup in EN/RU, plus tests for configuration parsing.
-- **Web & MQTT authentication**: Web UI credentials live in NVS (with a hardware reset pin). The broker keeps up to 16 MQTT credential slots (client ID + username + password) and ties each slot to an ACL entry.
+## Main Capabilities
 
----
+- Embedded MQTT broker for local devices over Wi-Fi
+- Web UI for status, settings, devices, audio and firmware update
+- Device profiles stored on SD card
+- Template-driven runtime logic for common puzzle patterns
+- Scenario engine with MQTT, audio, flags, waits, delays and loops
+- OTA update flow with rollback-aware status
+- Local status LED and fault monitoring
 
-## Hardware & Software Requirements
+## Current Architecture
 
-- ESP32-S3 board with PSRAM enabled.
-- SD card wired as `/sdcard` (SPI or SDMMC) for profile storage and large JSON assets.
-- Speaker or amplifier connected to the configured I2S pins.
-- ESP-IDF **5.3.x** (tested with 5.3.3) and its Python toolchain.
-- MQTT clients (devices) must support username/password logins when broker authentication is enabled.
-- Optional: MQTT-capable peripherals (RFID readers, laser heartbeat, relay boards) that will connect to the built-in broker over Wi-Fi.
+The codebase is now split into clear modules:
 
----
+- `device_model` - shared device and template types
+- `device_manager` - config, profiles, storage, import/export
+- `device_runtime` - runtime state and template execution
+- `automation_engine` - scenario orchestration
+- `audio_player` - playback service
+- `sd_storage` - SD card ownership
+- `web_ui` - HTTP/API layer
+- `mqtt_core` - MQTT broker
+- `event_bus` - internal module-to-module signaling
 
-## Building & Flashing
+Detailed architecture notes are in:
+
+- `docs/ARCHITECTURE.md`
+
+## Requirements
+
+- ESP32-S3
+- PSRAM enabled
+- SD card connected to configured SPI pins
+- I2S audio output connected if audio playback is used
+- ESP-IDF 5.3.x
+
+## Build
 
 ```bash
 idf.py set-target esp32s3
-idf.py menuconfig      # configure Wi-Fi, MQTT port/ACL, audio pins, SD card mode
+idf.py menuconfig
 idf.py build
 idf.py -p COMx flash monitor
 ```
 
-Useful `menuconfig` sections:
+## Important Runtime Storage
 
-- `Broker Configuration -> Wi-Fi`: STA SSID, password, AP fallback.
-- `Broker Configuration -> MQTT`: broker port, keepalive, ACL toggles, and credentials for up to 16 MQTT clients.
-- `Broker Configuration -> Audio / I2S`: BCLK, WS, DIN pins, amplifier enable GPIO.
-- `Broker Configuration -> Web UI`: HTTP port, static asset compression.
-- `Broker Configuration -> Web auth`: default username/password plus the GPIO used to reset credentials in the field.
+### NVS
 
----
+Stored in `config_store`:
 
-## Runtime Configuration Flow
+- Wi-Fi config
+- MQTT config and credentials
+- Web credentials
+- time/NTP config
+- logging flags
 
-1. **Wi-Fi**: on first boot the ESP32 brings up its AP and, if STA credentials are set, also tries to join the configured network. The UI shows both AP and STA IPs.
-2. **Web UI**: visit `http://<device-ip>/` and open the tabs (Status, Audio, Devices, Settings). Status exposes Wi-Fi, MQTT sessions, automation flags, SD card state, and live DRAM/PSRAM usage so you can catch memory leaks early.
-3. **MQTT broker**: clients connect directly to the ESP32 on the configured port (default 1883). The ACL table in `mqtt_core` restricts publish/subscribe prefixes per client ID.
-4. **Profiles**: in the Devices tab use the list on the left to add/clone/delete profiles. Only the active profile stays in PSRAM; everything else is serialized to `/sdcard/.dm_profiles`.
-5. **Devices & templates**: add devices via Simple editor or Wizard, choose the template, and fill its fields (slots, heartbeats, MQTT routes). Scenarios and topics appear under the template card.
-6. **Saving**: click “Save changes”. The manager validates the JSON, writes it to SD, reinitializes template runtimes, and logs the resulting memory usage.
+### SD Card
 
-### Status LED Feedback
+Stored through `sd_storage` and used by higher-level services:
 
-- GPIO 48 drives the built-in WS2812 LED to reflect system health.
-- Solid green (≈20% brightness) means Wi-Fi is connected and the SD card is mounted and healthy.
-- Solid red indicates Wi-Fi isn’t up yet; blinking red warns about a missing or faulty SD card.
-- These patterns come from `error_monitor` → `status_led`, so you can reuse the same API if extra states or custom colors are required.
+- active config backup
+- profile binaries in `/.dm_profiles`
+- audio files
 
----
+## Web UI
 
-## Built-in MQTT Broker
+The Web UI is served directly by the firmware.
 
-File `components/mqtt_core/mqtt_core.c` implements the server the peripherals connect to:
+Main functional areas:
 
-- Handles CONNECT/SUBSCRIBE/PUBLISH with QoS0/1, retain, and last-will (QoS2/TLS are intentionally omitted to fit the ESP32-S3 profile).
-- Keeps up to 16 client sessions with per-client ACL entries (see `k_acl`). Each entry limits publish and subscribe prefixes; extend the table or add dynamic configuration as needed.
-- Exposes stats in the Status tab (`mqtt_core_get_client_stats`).
-- Bridges events: when a client publishes a topic tied to a template runtime, `dm_template_runtime_handle_mqtt` injects it into the automation engine.
+- Status
+- Audio
+- Devices
+- Settings
+- Update
 
-> ACL checks are keyed by client ID, while CONNECT authentication can also require a username/password pair per slot. For untrusted networks configure both the credentials and the ACL entry so clients must match all three fields.
+Authentication:
 
----
+- cookie-based session auth
+- admin account
+- optional operator/user account
+- credential reset supported by hardware reset flow
 
-## Device Manager & Templates
+## OTA Update
 
-The manager keeps the active profile in PSRAM while writing snapshots to SD (`components/device_manager`). Each device may use one template plus custom scenarios.
+OTA is supported through the Web UI.
 
-| Template ID | Use case | Key fields |
-| ----------- | -------- | ---------- |
-| `uid_validator` | Pair/cluster of UID readers that must match configured values. | Slots (source ID + allowed UIDs), success/fail MQTT topics and audio. |
-| `signal_hold` | Laser/photoresistor puzzle that accumulates heartbeat time. | Heartbeat topic/timeouts, hold duration, relay topic/payloads, hold/complete tracks. |
-| `on_mqtt_event` | Trigger scenarios on incoming MQTT topics/payloads. | Rule list (topic, payload, payload_required, scenario). |
-| `on_flag` | React to automation flags toggling. | Flag name, required boolean, scenario per rule. |
-| `if_condition` | Evaluate multiple flag requirements and run true/false scenario. | Logic mode (all/any), list of flag requirements, two scenario IDs. |
-| `interval_task` | Run a scenario on a fixed period. | Scenario ID, interval in ms, optional “run immediately”. |
-| `sequence_lock` | Enforce an ordered list of MQTT triggers. | Steps (topic + optional payload/hints), timeout/reset behavior, success/fail MQTT/audio/scenario outputs. |
+Flow:
 
-Documentation:
+1. open the firmware update page
+2. upload the built firmware binary
+3. device writes image into OTA partition
+4. device reports `phase=reboot_required`
+5. operator explicitly requests reboot
+6. device boots into new image
+7. healthy boot confirms the update
 
-- `docs/SCENARIO_SETUP.md` – step-by-step instructions in English for setting up each template in the UI.
-- `docs/SCENARIO_SETUP_RUS.md` – the same in Russian.
-- `docs/TEMPLATE_GUIDE.md` and `docs/TEMPLATE_GUIDE_RUS.md` – behavioral deep dives with verification steps and troubleshooting tips.
+The OTA status view shows:
 
----
+- running partition
+- boot partition
+- current app version
+- transfer progress
+- lifecycle phase
+- rollback-related state
 
-## Automation Engine & Scenarios
+Main OTA phases exposed by the API:
 
-Scenarios are ordered step lists stored under each device. Supported step types (see `device_action_type_t`):
+- `idle`
+- `uploading`
+- `reboot_required`
+- `rebooting`
+- `verify_wait_ready`
+- `verify_pending`
 
-- `mqtt_publish`: topic, payload, QoS, retain flag.
-- `audio_play` / `audio_stop`: track path and blocking mode.
-- `set_flag`: set or clear named automation flags.
-- `wait_flags`: wait for a set of flags (all/any) with optional timeout.
-- `loop`: jump to a previous step with iteration limit.
-- `delay`: pause for N milliseconds.
-- `event_bus`: post custom events (topic + payload) on the internal bus.
-- `nop`: placeholder for manual ordering.
+## Device Configuration Model
 
-Automation workers pull jobs from a queue, allowing multiple devices to run in parallel. Long audio or waits no longer stall the system because workers are configurable in menuconfig.
+The system keeps one active profile in RAM and persists profiles on SD.
 
----
+Typical flow:
 
-## Web UI Tour
+1. load active config from SD
+2. rebuild template runtime
+3. serve/edit config via Web UI
+4. save updated config back to SD
+5. rebuild runtime again after apply
 
-- **Status**: Wi-Fi state, MQTT server stats, SD health, **free DRAM/PSRAM headroom**, current flags, automation worker load. Provides form inputs for Wi-Fi/MQTT configuration.
-- **Audio**: browse SD tracks, play/pause/stop manually, configure default volume, and test amplifier GPIO.
-- **Devices**: two editors:
-  - *Simple editor* for direct JSON-backed editing (tabs, topics, scenarios, templates).
-  - *Wizard* for a guided flow to add templates quickly.
-  JSON preview at the bottom shows what will be saved; you can copy it for backups.
-- **Settings**: firmware info, OTA slot, ability to reboot the device, and API links.
+This keeps inactive profiles off RAM while allowing live switching.
 
-### Web UI Roles
+## Template and Scenario System
 
-- **Admin** (default) sees все вкладки и может редактировать устройства, профили, MQTT/веб-настройки. Этой ролью вы авторизуетесь стандартными `admin/admin` или любыми новыми учётными данными.
-- **Operator/User** — облегчённый режим для полевых сценариев. Его можно включить на вкладке Settings → Operator account: задать отдельный логин/пароль и включить флажок `Enable operator`.
-  - После входа оператор попадает сразу во вкладку *Actions*, где показаны только карточки сценариев с компактными кнопками, масштабированными под телефоны.
-  - Остальные вкладки скрыты, так что оператор не сможет случайно изменить конфигурацию.
-  - Администратор может отключить оператора или поменять его пароль в любой момент; при отключении все активные сессии закрываются.
+### Templates
 
-### Web UI Authentication
+The current template set includes:
 
-- Default credentials are defined in `menuconfig → Broker Configuration → Web auth` (factory setting: `admin / admin`).
-- On first boot the firmware hashes those values and stores them in NVS. Changing defaults requires either erasing NVS or triggering the hardware reset before a reboot.
-- To recover access in the field, assign any unused GPIO in the same menu and short it to GND for ~10 seconds while the device is running. The log prints `web auth reset pin triggered`, all sessions are cleared, and the defaults become active again.
-- After any password change or reset the firmware deletes existing cookies, so every browser must log in again.
+- `uid_validator`
+- `signal_hold`
+- `on_mqtt_event`
+- `on_flag`
+- `if_condition`
+- `interval_task`
+- `sequence_lock`
 
-### MQTT Client Authentication
+Templates are configuration-driven. Their runtime state lives in `device_runtime`.
 
-- The broker maintains up to 16 user slots (client ID + username + password). Edit them in the Settings tab (`Broker Configuration → MQTT`) or via `menuconfig`.
-- For each slot set all three fields to enable it. Leaving a client ID empty effectively disables that slot and frees the credential.
-- Credentials are stored in NVS; `config_store` clamps `user_count` to the number of populated entries so unused slots do not waste RAM.
-- Each configured client maps to an ACL entry in `mqtt_core` restricting publish/subscribe prefixes. Expand the ACL table when adding more clients or topics.
-- Devices must supply matching credentials in their MQTT CONNECT packet (client ID + username + password). A mismatch causes the broker to drop the CONNECT before any automation template sees the message.
-- When the hardware reset pin is triggered both the Web UI password and MQTT credential table revert to defaults, so keep an offline copy of production credentials.
+### Scenarios
 
----
+Scenarios are executed by `automation_engine`.
 
-## Persistence & Memory Strategy
+Supported step types include:
 
-- Configurations live in PSRAM (active profile only). `device_manager` allocates descriptors dynamically and frees them during reloads.
-- Profiles are serialized to `/sdcard/.dm_profiles/<id>.bin`; JSON exports go to `/sdcard/device_manager.json`.
-- `dm_template_runtime_reset` frees per-template linked lists before registering runtimes, preventing leaks when the UI reloads a configuration.
-- Large JSON responses (status, files, config export) stream in chunks to minimize RAM spikes.
+- `mqtt_publish`
+- `audio_play`
+- `audio_stop`
+- `set_flag`
+- `wait_flags`
+- `delay`
+- `loop`
+- `event_bus`
+- `nop`
 
----
+## Audio
 
-## REST API & Assets
+Audio is handled by `audio_player`.
 
-Key HTTP endpoints (all under `/api`):
+Responsibilities:
 
-| Endpoint | Method | Description |
-| -------- | ------ | ----------- |
-| `/api/status` | GET | Wi-Fi, MQTT, SD, automation stats. |
-| `/api/devices/config` | GET | Active configuration JSON. |
-| `/api/devices/apply` | POST | Apply JSON payload (entire config or specific profile). |
-| `/api/devices/profile/*` | POST | Create, rename, delete, or activate profiles. |
-| `/api/devices/run` | GET | Trigger scenario (`device`, `scenario` query params). |
-| `/api/templates.js` | GET | JS payload for the wizard/editor. |
-| `/api/config/mqtt`, `/api/config/wifi` | GET/POST | Update router/broker parameters. |
+- playback control
+- decode/read pipeline
+- I2S output
+- playback status
+- volume persistence
 
-`components/web_ui` hosts the HTTP handlers plus the `build_devices_wizard.py` script that assembles JS/CSS assets at build time.
+The SD card is not owned by audio anymore. Audio uses `sd_storage` like any other consumer.
 
----
+## MQTT
 
-## Logging & Debugging
+`mqtt_core` implements the local broker.
 
-- Use `idf.py monitor --timestamp` to correlate button presses, MQTT events, and scenario logs.
-- Raise log verbosity for modules when debugging:
-  - `ESP_LOG_LEVEL_DEBUG("template_runtime", ...)`
-  - `esp_log_level_set("automation", ESP_LOG_DEBUG);`
-  - `esp_log_level_set("mqtt_core", ESP_LOG_DEBUG);`
-- Device Manager emits `dm_copy size=<bytes>` messages when reloading; monitor PSRAM/internal heap there.
-- Web UI handlers log HTTP errors (400/500) to help diagnose malformed JSON or SD failures.
+Responsibilities:
 
----
+- client sessions
+- publish path
+- injected local MQTT messages
+- event mapping to internal bus
+- stats for UI/status
 
-## Tests
+The broker is intended for local embedded devices and puzzle hardware, not as a general-purpose internet-facing broker.
 
-Unit tests live next to their components and are wrapped by standalone test apps in `tests/`. Currently available:
+## Status and Fault Monitoring
 
-- `tests/device_manager`: exercises JSON parsing (topics, scenarios, capacity limits).
+`error_monitor` drives the status LED and aggregates health signals.
 
-Run a test suite:
+Examples:
 
-```bash
-cd tests/device_manager
-idf.py set-target esp32s3
-idf.py -p COMx flash monitor
-```
+- Wi-Fi disconnected
+- SD missing or mount failure
+- audio fault indication
 
-Unity prints pass/fail to the serial console. Add more tests by copying the pattern and importing the component’s `test/*.c` files.
+SD card state now reaches `error_monitor` through `event_bus`, not through direct calls from storage.
 
----
+## Project Layout
 
-## Documentation Map
-
-- `docs/SCENARIO_SETUP.md` / `_RUS.md`: hands-on UI instructions for every template.
-- `docs/TEMPLATE_GUIDE.md` / `_RUS.md`: behavioral reference and verification steps.
-- `docs/ARCHITECTURE.md`: system overview, data flow diagram, component responsibilities, and CI notes.
-- `docs/` is the place for future guides (hardware wiring, troubleshooting, etc.).
-
----
-
-## Repository Layout
-
-```
+```text
 components/
-  automation_engine/      Scenario workers, step executor.
-  audio_player/           I2S playback helpers.
-  config_store/           Wi-Fi, MQTT, audio configuration.
-  device_manager/         Core config, parser, profiles, templates, runtimes.
-  event_bus/              Lightweight event dispatcher.
-  mqtt_core/              Built-in MQTT broker.
-  web_ui/                 HTTP handlers + asset builder.
-docs/                     Template guides and how-tos.
-main/                     `app_main`, Wi-Fi/bootstrap logic.
-tests/                    Standalone test applications (Unity-based).
+  audio_player/
+  automation_engine/
+  config_store/
+  device_manager/
+  device_model/
+  device_runtime/
+  error_monitor/
+  event_bus/
+  mqtt_core/
+  network/
+  ota_manager/
+  sd_storage/
+  status_led/
+  web_ui/
+docs/
+  ARCHITECTURE.md
+main/
+  main.c
 ```
 
----
+## Documentation
 
-## Contributing & Roadmap Ideas
+- `docs/ARCHITECTURE.md` - module boundaries and layered design
+- `docs/SCENARIO_SETUP.md` - scenario setup guide
+- `docs/SCENARIO_SETUP_RUS.md` - same in Russian
+- `docs/TEMPLATE_GUIDE.md` - template behavior guide
+- `docs/TEMPLATE_GUIDE_RUS.md` - same in Russian
 
-- When adding templates or automation steps, touch `dm_templates`, `template_runtime`, the web UI editors, and documentation simultaneously.
-- Keep configurations ASCII-only unless a file already uses UTF-8 text.
-- Ideas/TODOs often discussed:
-  - Authentication for MQTT and the Web UI.
-  - Streaming JSON responses for all HTTP handlers to shrink RAM spikes further.
-  - Additional templates (combined triggers, state machines) and wizard cards.
-  - Extended diagnostics (profiling automation queue latency).
+## Notes for Further Work
 
-Pull requests and issues are welcome. Please run `idf.py build` and relevant tests before submitting changes. Continuous improvement of documentation and templates helps integrators understand the system faster.
+Likely next evolutions:
+
+- additional runtime snapshot/read-model cleanup
+- finer split inside `device_manager`
+- more OTA diagnostics
+- more tests around config/profile/runtime transitions

@@ -15,6 +15,8 @@
 #include "error_monitor.h"
 #include "device_manager.h"
 #include "automation_engine.h"
+#include "ota_manager.h"
+#include "service_status.h"
 #include "esp_task_wdt.h"
 #include <inttypes.h>
 #include <string.h>
@@ -89,12 +91,37 @@ static void device_manager_boot_task(void *param)
         ESP_LOGE(TAG, "automation_engine_start failed: %s", esp_err_to_name(err));
     } else {
         ESP_LOGI(TAG, "automation engine started");
+        ota_manager_notify_system_ready();
     }
 exit:
     if (wdt_registered) {
         esp_task_wdt_delete(NULL);
     }
     vTaskDelete(NULL);
+}
+
+static bool app_init_optional(const char *name, service_status_id_t id, esp_err_t (*fn)(void))
+{
+    esp_err_t err = fn ? fn() : ESP_ERR_INVALID_ARG;
+    service_status_mark_init(id, err);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "init %s ok", name ? name : "optional");
+        return true;
+    }
+    ESP_LOGE(TAG, "init %s failed: %s", name ? name : "optional", esp_err_to_name(err));
+    return false;
+}
+
+static bool app_start_optional(const char *name, service_status_id_t id, esp_err_t (*fn)(void))
+{
+    esp_err_t err = fn ? fn() : ESP_ERR_INVALID_ARG;
+    service_status_mark_start(id, err);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "start %s ok", name ? name : "optional");
+        return true;
+    }
+    ESP_LOGE(TAG, "start %s failed: %s", name ? name : "optional", esp_err_to_name(err));
+    return false;
 }
 
 void app_main(void)
@@ -108,31 +135,56 @@ void app_main(void)
 
     ESP_LOGI(TAG, "init nvs_flash");
     ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_LOGI(TAG, "init ota_manager");
+    ESP_ERROR_CHECK(ota_manager_init());
+    ESP_LOGI(TAG, "ota boot notify");
+    ESP_ERROR_CHECK(ota_manager_notify_boot());
     ESP_LOGI(TAG, "init config_store");
     ESP_ERROR_CHECK(config_store_init());
     ESP_LOGI(TAG, "init event_bus");
     ESP_ERROR_CHECK(event_bus_init());
+    ESP_LOGI(TAG, "init service_status");
+    ESP_ERROR_CHECK(service_status_init());
     ESP_LOGI(TAG, "init error_monitor");
     ESP_ERROR_CHECK(error_monitor_init());
-    ESP_LOGI(TAG, "init network");
-    ESP_ERROR_CHECK(network_init());
-    ESP_LOGI(TAG, "init mqtt_core");
-    ESP_ERROR_CHECK(mqtt_core_init());
-    ESP_LOGI(TAG, "init audio_player");
-    ESP_ERROR_CHECK(audio_player_init());
-    ESP_LOGI(TAG, "init web_ui");
-    ESP_ERROR_CHECK(web_ui_init());
+    ESP_LOGI(TAG, "init optional services");
+    bool network_ok = app_init_optional("network", SERVICE_STATUS_NETWORK, network_init);
+    bool mqtt_ok = app_init_optional("mqtt_core", SERVICE_STATUS_MQTT, mqtt_core_init);
+    bool audio_ok = app_init_optional("audio_player", SERVICE_STATUS_AUDIO, audio_player_init);
+    bool web_ui_ok = app_init_optional("web_ui", SERVICE_STATUS_WEB_UI, web_ui_init);
+
+    if (!audio_ok) {
+        error_monitor_report_audio_fault();
+    }
 
     ESP_LOGI(TAG, "start event_bus");
     event_bus_start();
-    ESP_LOGI(TAG, "start network");
-    network_start();
-    ESP_LOGI(TAG, "start mqtt_core");
-    mqtt_core_start();
-    ESP_LOGI(TAG, "start audio_player");
-    audio_player_start();
-    ESP_LOGI(TAG, "start web_ui");
-    web_ui_start();
+    if (network_ok) {
+        ESP_LOGI(TAG, "start network");
+        app_start_optional("network", SERVICE_STATUS_NETWORK, network_start);
+    } else {
+        ESP_LOGW(TAG, "skip network start: init failed");
+    }
+    if (mqtt_ok) {
+        ESP_LOGI(TAG, "start mqtt_core");
+        app_start_optional("mqtt_core", SERVICE_STATUS_MQTT, mqtt_core_start);
+    } else {
+        ESP_LOGW(TAG, "skip mqtt_core start: init failed");
+    }
+    if (audio_ok) {
+        ESP_LOGI(TAG, "start audio_player");
+        if (!app_start_optional("audio_player", SERVICE_STATUS_AUDIO, audio_player_start)) {
+            error_monitor_report_audio_fault();
+        }
+    } else {
+        ESP_LOGW(TAG, "skip audio_player start: init failed");
+    }
+    if (web_ui_ok) {
+        ESP_LOGI(TAG, "start web_ui");
+        app_start_optional("web_ui", SERVICE_STATUS_WEB_UI, web_ui_start);
+    } else {
+        ESP_LOGW(TAG, "skip web_ui start: init failed");
+    }
 
 #if (configUSE_TRACE_FACILITY == 1)
     xTaskCreate(stats_task, "stats_task", 4096, NULL, 3, NULL);

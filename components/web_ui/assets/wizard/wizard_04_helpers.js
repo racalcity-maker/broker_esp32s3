@@ -42,7 +42,7 @@ function refreshTrackPickers() {
   });
 }
 
-const TRACK_LOOKUP_ROOT = '/sdcard';
+const TRACK_LOOKUP_ROOT = (typeof AUDIO_ROOT === 'string' && AUDIO_ROOT) ? AUDIO_ROOT : '/sdcard';
 const TRACK_LOOKUP_MAX_DIRS = 48;
 const TRACK_LOOKUP_MAX_TRACKS = 600;
 let trackLookupCache = [];

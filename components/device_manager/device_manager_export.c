@@ -8,7 +8,7 @@
 
 #include "dm_profiles.h"
 #include "dm_storage.h"
-#include "device_manager_utils.h"
+#include "device_model_utils.h"
 #include "dm_template_runtime.h"
 
 // Helper: add string field if value is non-empty.
@@ -159,6 +159,8 @@ static cJSON *uid_template_to_json(const device_descriptor_t *dev)
     template_to_json_string(root, "fail_payload", tpl->fail_payload);
     template_to_json_string(root, "success_audio_track", tpl->success_audio_track);
     template_to_json_string(root, "fail_audio_track", tpl->fail_audio_track);
+    template_to_json_string(root, "bg_track", tpl->bg_track);
+    template_to_json_string(root, "bg_start_topic", tpl->bg_start_topic);
     template_to_json_string(root, "success_signal_topic", tpl->success_signal_topic);
     template_to_json_string(root, "success_signal_payload", tpl->success_signal_payload);
     template_to_json_string(root, "fail_signal_topic", tpl->fail_signal_topic);

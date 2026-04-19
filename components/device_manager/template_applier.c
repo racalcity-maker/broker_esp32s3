@@ -2,8 +2,8 @@
 
 #include <string.h>
 
-#include "device_manager_utils.h"
-#include "dm_template_runtime.h"
+#include "dm_runtime_service.h"
+#include "device_model_utils.h"
 
 static device_descriptor_t *find_device(device_manager_config_t *cfg, const char *id)
 {
@@ -161,7 +161,7 @@ esp_err_t dm_template_apply_to_config(device_manager_config_t *cfg,
         break;
     }
     if (res == ESP_OK) {
-        dm_template_runtime_register(tpl, device_id);
+        res = dm_runtime_service_register_template(tpl, device_id);
     }
     return res;
 }

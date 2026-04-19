@@ -6,7 +6,7 @@
 
 #include "dm_profiles.h"
 #include "dm_storage.h"
-#include "device_manager_utils.h"
+#include "device_model_utils.h"
 
 static const char *TAG = "device_manager";
 
@@ -128,6 +128,14 @@ static bool uid_template_from_json(dm_uid_template_t *tpl, const cJSON *obj)
     const cJSON *fail_audio = cJSON_GetObjectItem(obj, "fail_audio_track");
     if (cJSON_IsString(fail_audio) && fail_audio->valuestring) {
         dm_str_copy(tpl->fail_audio_track, sizeof(tpl->fail_audio_track), fail_audio->valuestring);
+    }
+    const cJSON *bg_track = cJSON_GetObjectItem(obj, "bg_track");
+    if (cJSON_IsString(bg_track) && bg_track->valuestring) {
+        dm_str_copy(tpl->bg_track, sizeof(tpl->bg_track), bg_track->valuestring);
+    }
+    const cJSON *bg_start_topic = cJSON_GetObjectItem(obj, "bg_start_topic");
+    if (cJSON_IsString(bg_start_topic) && bg_start_topic->valuestring) {
+        dm_str_copy(tpl->bg_start_topic, sizeof(tpl->bg_start_topic), bg_start_topic->valuestring);
     }
     const cJSON *success_signal_topic = cJSON_GetObjectItem(obj, "success_signal_topic");
     if (cJSON_IsString(success_signal_topic) && success_signal_topic->valuestring) {
