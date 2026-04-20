@@ -37,6 +37,18 @@ static SemaphoreHandle_t s_lock;
 static device_manager_config_t *s_config = NULL;
 static bool s_config_ready = false;
 
+static esp_err_t dm_post_config_changed_event(void)
+{
+    event_bus_message_t msg = {
+        .type = EVENT_DEVICE_CONFIG_CHANGED,
+    };
+    esp_err_t err = event_bus_post(&msg, 0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to post config changed event: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 // Returns zeroed config large enough to hold `capacity` devices in PSRAM (fallback to internal RAM).
 static device_manager_config_t *dm_config_alloc(uint8_t capacity)
 {
@@ -173,14 +185,15 @@ static void dm_unlock(void)
     }
 }
 
-esp_err_t device_manager_init(void)
+static esp_err_t dm_prepare_buffers(void)
 {
-    ESP_LOGI(TAG, ">>> ENTER device_manager_init()");
-    ESP_LOGI(TAG, "PSRAM free: %u, internal free: %u",
-             heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-    ESP_LOGI(TAG, "device_manager_init start");
-    if (!s_lock) { s_lock = xSemaphoreCreateMutex(); }
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_lock) {
+        ESP_LOGE(TAG, "failed to create device manager mutex");
+        return ESP_ERR_NO_MEM;
+    }
     if (s_config_ready) {
         ESP_LOGI(TAG, "device_manager already initialized");
         return ESP_OK;
@@ -195,16 +208,23 @@ esp_err_t device_manager_init(void)
     ESP_LOGI(TAG, "loading defaults to config buffer");
     dm_load_defaults(s_config);
     feed_wdt();
+    return ESP_OK;
+}
+
+static esp_err_t dm_load_or_create_config(void)
+{
     device_manager_config_t *temp = dm_config_alloc(DEVICE_MANAGER_MAX_DEVICES);
     if (!temp) {
         ESP_LOGE(TAG, "no memory for temp config");
         return ESP_ERR_NO_MEM;
     }
+
     feed_wdt();
     ESP_LOGI(TAG, "Expected cfg size=%zu",
              sizeof(device_manager_config_t) +
                  dm_config_device_bytes(temp, temp->device_capacity));
     ESP_LOGI(TAG, "loading config from %s", CONFIG_BACKUP_PATH);
+
     esp_err_t load_err = dm_storage_load(CONFIG_BACKUP_PATH, temp);
     feed_wdt();
     if (load_err == ESP_OK) {
@@ -222,25 +242,67 @@ esp_err_t device_manager_init(void)
         ESP_ERROR_CHECK_WITHOUT_ABORT(dm_storage_save(CONFIG_BACKUP_PATH, s_config));
         dm_unlock();
     }
+
     dm_config_free(temp);
+    return ESP_OK;
+}
+
+static esp_err_t dm_sync_profiles(void)
+{
     dm_profiles_sync_from_active(s_config, true);
     dm_profiles_sync_to_active(s_config);
     s_config_ready = true;
-    esp_err_t rt_err = dm_runtime_service_init();
-    if (rt_err != ESP_OK) {
-        ESP_LOGE(TAG, "template runtime init failed: %s", esp_err_to_name(rt_err));
-        return rt_err;
+    return ESP_OK;
+}
+
+static esp_err_t dm_build_runtime(void)
+{
+    esp_err_t err = dm_runtime_service_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "template runtime init failed: %s", esp_err_to_name(err));
+        return err;
     }
-    rt_err = dm_runtime_service_rebuild(s_config);
-    if (rt_err != ESP_OK) {
-        ESP_LOGE(TAG, "template runtime rebuild failed: %s", esp_err_to_name(rt_err));
-        return rt_err;
+    err = dm_runtime_service_rebuild(s_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "template runtime rebuild failed: %s", esp_err_to_name(err));
+        return err;
     }
-    ESP_LOGI(TAG, "device_manager_init finished successfully");
+    return ESP_OK;
+}
+
+static void dm_boot_retry_delay(void)
+{
     for (int i = 0; i < DM_BOOT_RETRY_COUNT; ++i) {
         feed_wdt();
         vTaskDelay(pdMS_TO_TICKS(DM_BOOT_RETRY_DELAY_MS));
     }
+}
+
+esp_err_t device_manager_init(void)
+{
+    ESP_LOGI(TAG, ">>> ENTER device_manager_init()");
+    ESP_LOGI(TAG, "PSRAM free: %u, internal free: %u",
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    ESP_LOGI(TAG, "device_manager_init start");
+    esp_err_t err = dm_prepare_buffers();
+    if (err != ESP_OK || s_config_ready) {
+        return err;
+    }
+    err = dm_load_or_create_config();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = dm_sync_profiles();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = dm_build_runtime();
+    if (err != ESP_OK) {
+        return err;
+    }
+    ESP_LOGI(TAG, "device_manager_init finished successfully");
+    dm_boot_retry_delay();
     ESP_LOGI(TAG, "device_manager_init done");
     return ESP_OK;
 }
@@ -348,10 +410,10 @@ esp_err_t device_manager_apply(const device_manager_config_t *next)
             ESP_LOGE(TAG, "device_manager_apply: runtime rebuild failed: %s", esp_err_to_name(err));
             return err;
         }
-        event_bus_message_t msg = {
-            .type = EVENT_DEVICE_CONFIG_CHANGED,
-        };
-        event_bus_post(&msg, 0);
+        esp_err_t event_err = dm_post_config_changed_event();
+        if (event_err != ESP_OK) {
+            return event_err;
+        }
     } else {
         ESP_LOGE(TAG, "device_manager_apply: persist failed: %s", esp_err_to_name(err));
     }
@@ -616,10 +678,10 @@ esp_err_t device_manager_profile_activate(const char *id)
             ESP_LOGE(TAG, "device_manager_profile_activate: runtime rebuild failed: %s", esp_err_to_name(err));
             return err;
         }
-        event_bus_message_t msg = {
-            .type = EVENT_DEVICE_CONFIG_CHANGED,
-        };
-        event_bus_post(&msg, 0);
+        esp_err_t event_err = dm_post_config_changed_event();
+        if (event_err != ESP_OK) {
+            return event_err;
+        }
     }
     return err;
 }

@@ -65,6 +65,11 @@ int audio_player_runtime_volume(void)
     return s_volume;
 }
 
+int *audio_player_volume_ptr(void)
+{
+    return &s_volume;
+}
+
 esp_err_t audio_player_set_volume(int percent)
 {
     if (percent < 0) {

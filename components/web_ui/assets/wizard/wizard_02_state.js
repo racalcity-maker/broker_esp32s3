@@ -29,6 +29,12 @@ function loadModel() {
 
 function saveModel() {
   if (!state.model || state.busy) return;
+  updateValidationState();
+  if ((state.validation?.errors || []).length) {
+    renderValidationOverview();
+    setStatus(`Fix validation errors before saving (${state.validation.errors.length})`, '#f87171');
+    return;
+  }
   setStatus('Saving...', '#fbbf24');
   state.busy = true;
   const payload = prepareConfigForSave(state.model);
@@ -56,15 +62,19 @@ function saveModel() {
 
 function markDirty() {
   state.dirty = true;
+  updateValidationState();
   renderJson();
+  renderValidationOverview();
   updateToolbar();
   renderActions();
 }
 
 function renderAll() {
+  updateValidationState();
   renderDeviceList();
   renderDeviceDetail();
   renderJson();
+  renderValidationOverview();
   updateToolbar();
   updateGlobals();
   renderProfiles();

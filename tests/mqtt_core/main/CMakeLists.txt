@@ -9,3 +9,6 @@ idf_component_register(
     PRIV_REQUIRES mqtt_core event_bus unity
 )
 
+target_include_directories(${COMPONENT_LIB} PRIVATE
+    "${CMAKE_SOURCE_DIR}/../../components/mqtt_core"
+)

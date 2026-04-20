@@ -165,6 +165,8 @@ static cJSON *uid_template_to_json(const device_descriptor_t *dev)
     template_to_json_string(root, "success_signal_payload", tpl->success_signal_payload);
     template_to_json_string(root, "fail_signal_topic", tpl->fail_signal_topic);
     template_to_json_string(root, "fail_signal_payload", tpl->fail_signal_payload);
+    template_to_json_string(root, "success_scenario", tpl->success_scenario);
+    template_to_json_string(root, "fail_scenario", tpl->fail_scenario);
     return root;
 }
 
@@ -502,26 +504,7 @@ esp_err_t dm_storage_internal_export(const device_manager_config_t *cfg, char **
         cJSON_AddItemToArray(devices, d);
         const char *display_name = dev->display_name[0] ? dev->display_name : dev->id;
         cJSON_AddStringToObject(d, "id", dev->id);
-        cJSON_AddStringToObject(d, "name", display_name);
         cJSON_AddStringToObject(d, "display_name", display_name);
-
-        cJSON *topics = cJSON_AddArrayToObject(d, "topics");
-        if (!topics) {
-            err = ESP_ERR_NO_MEM;
-            goto cleanup;
-        }
-        for (uint8_t tp = 0; tp < dev->topic_count && tp < DEVICE_MANAGER_MAX_TOPICS_PER_DEVICE; ++tp) {
-            const device_topic_binding_t *binding = &dev->topics[tp];
-            cJSON *topic_obj = cJSON_CreateObject();
-            if (!topic_obj) {
-                err = ESP_ERR_NO_MEM;
-                goto cleanup;
-            }
-            cJSON_AddItemToArray(topics, topic_obj);
-            cJSON_AddStringToObject(topic_obj, "name", binding->name);
-            cJSON_AddStringToObject(topic_obj, "topic", binding->topic);
-            feed_wdt();
-        }
 
         cJSON *scenarios = cJSON_AddArrayToObject(d, "scenarios");
         if (!scenarios) {
@@ -574,6 +557,9 @@ esp_err_t dm_storage_internal_export(const device_manager_config_t *cfg, char **
         }
         size_t len = strlen(printed);
         char *buf = heap_caps_malloc(len + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!buf) {
+            buf = heap_caps_malloc(len + 1, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
         if (!buf) {
             free(printed);
             err = ESP_ERR_NO_MEM;

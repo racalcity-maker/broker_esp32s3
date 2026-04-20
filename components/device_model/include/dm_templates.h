@@ -47,6 +47,9 @@ typedef struct {
     char success_signal_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
     char fail_signal_topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
     char fail_signal_payload[DEVICE_MANAGER_PAYLOAD_MAX_LEN];
+
+    char success_scenario[DEVICE_MANAGER_ID_MAX_LEN];
+    char fail_scenario[DEVICE_MANAGER_ID_MAX_LEN];
 } dm_uid_template_t;
 
 typedef enum {

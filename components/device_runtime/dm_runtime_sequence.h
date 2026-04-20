@@ -31,3 +31,5 @@ dm_sequence_action_t dm_sequence_runtime_handle(dm_sequence_runtime_t *rt,
                                                 const char *topic,
                                                 const char *payload,
                                                 uint64_t now_ms);
+dm_sequence_action_t dm_sequence_runtime_handle_timeout(dm_sequence_runtime_t *rt,
+                                                        uint64_t now_ms);

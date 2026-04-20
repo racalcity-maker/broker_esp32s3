@@ -1,15 +1,17 @@
 set(TEST_SRCS
     "test_runner.c"
     "test_device_manager_parse.c"
+    "test_runtime_pure.c"
     "test_device_manager_integration.c"
 )
 
 idf_component_register(
     SRCS ${TEST_SRCS}
     INCLUDE_DIRS "."
-    PRIV_REQUIRES device_manager unity json
+    PRIV_REQUIRES device_manager device_runtime unity json
 )
 
 target_include_directories(${COMPONENT_LIB} PRIVATE
     "${CMAKE_SOURCE_DIR}/../../components/device_manager"
+    "${CMAKE_SOURCE_DIR}/../../components/device_runtime"
 )

@@ -25,6 +25,6 @@ esp_err_t auth_logout_handler(httpd_req_t *req);
 esp_err_t auth_password_handler(httpd_req_t *req);
 esp_err_t session_info_handler(httpd_req_t *req);
 
-void web_sessions_init(void);
+esp_err_t web_sessions_init(void);
 void web_sessions_clear(void);
 void web_auth_start_reset_monitor(void);

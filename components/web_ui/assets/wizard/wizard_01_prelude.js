@@ -4,13 +4,13 @@
 const ACTION_TYPES = ['mqtt_publish','audio_play','audio_stop','set_flag','wait_flags','loop','delay','event','nop'];
 const TEMPLATE_TYPES = [
   {value: '', label: 'No template'},
-  {value: 'uid_validator', label: 'UID validator'},
-  {value: 'signal_hold', label: 'Signal hold'},
-  {value: 'on_mqtt_event', label: 'MQTT trigger'},
-  {value: 'on_flag', label: 'Flag trigger'},
-  {value: 'if_condition', label: 'Conditional scenario'},
-  {value: 'interval_task', label: 'Interval task'},
-  {value: 'sequence_lock', label: 'Sequence lock'},
+  {value: 'uid_validator', label: 'UID Validator'},
+  {value: 'signal_hold', label: 'Signal Hold'},
+  {value: 'on_mqtt_event', label: 'When MQTT message arrives'},
+  {value: 'on_flag', label: 'When flag changes'},
+  {value: 'if_condition', label: 'Conditional branch'},
+  {value: 'interval_task', label: 'Run on interval'},
+  {value: 'sequence_lock', label: 'Sequence Lock'},
 ];
 const MQTT_RULE_LIMIT = 8;
 const FLAG_RULE_LIMIT = 8;
@@ -25,7 +25,6 @@ const WIZARD_TEMPLATES = {
     fields: [],
     build(base) {
       base.scenarios = [];
-      base.topics = [];
       return base;
     },
   },
@@ -41,6 +40,9 @@ const state = {
   json: null,
   jsonWrap: null,
   statusEl: null,
+  validationEl: null,
+  trackPickerModal: null,
+  trackPickerContent: null,
   model: null,
   profiles: [],
   activeProfile: '',
@@ -50,6 +52,12 @@ const state = {
   busy: false,
   dirty: false,
   jsonVisible: false,
+  validation: {errors: [], warnings: []},
+  trackPicker: {
+    open: false,
+    query: '',
+    targetInput: null,
+  },
   wizard: {
     open: false,
     step: 0,
@@ -124,12 +132,16 @@ function buildShell() {
         <button class="primary" data-action="save">Save changes</button>
         <span class="dw-status" id="dw_status">Not loaded</span>
       </div>
+      <div class="dw-validation hidden" id="dw_validation"></div>
       <div class="dw-layout">
         <div class="dw-list" id="dw_device_list"></div>
         <div class="dw-detail" id="dw_device_detail"></div>
       </div>
       <div class="dw-json collapsed" id="dw_json_panel">
         <pre class="dw-json-content" id="dw_json_preview">No config</pre>
+      </div>
+      <div class="dw-modal hidden" id="dw_track_picker_modal">
+        <div class="dw-modal-content" id="dw_track_picker_content"></div>
       </div>
       <div class="dw-modal hidden" id="dw_wizard_modal">
         <div class="dw-modal-content" id="dw_wizard_content"></div>
@@ -142,6 +154,9 @@ function buildShell() {
   state.json = document.getElementById('dw_json_preview');
   state.jsonWrap = document.getElementById('dw_json_panel');
   state.statusEl = document.getElementById('dw_status');
+  state.validationEl = document.getElementById('dw_validation');
+  state.trackPickerModal = document.getElementById('dw_track_picker_modal');
+  state.trackPickerContent = document.getElementById('dw_track_picker_content');
   state.wizardModal = document.getElementById('dw_wizard_modal');
   state.wizardContent = document.getElementById('dw_wizard_content');
   state.profileList = document.getElementById('dw_profile_list');
@@ -209,8 +224,18 @@ function attachEvents() {
   });
   state.actionsRoot?.addEventListener('click', (ev) => {
     const btn = ev.target.closest('[data-run-device][data-run-scenario]');
-    if (!btn) return;
-    runScenario(btn.dataset.runDevice, btn.dataset.runScenario);
+    if (btn) {
+      runScenario(btn.dataset.runDevice, btn.dataset.runScenario);
+      return;
+    }
+    const signalResetBtn = ev.target.closest('[data-signal-reset-device]');
+    if (signalResetBtn) {
+      resetSignal(signalResetBtn.dataset.signalResetDevice, signalResetBtn);
+      return;
+    }
+    const resetBtn = ev.target.closest('[data-sequence-reset-device]');
+    if (!resetBtn) return;
+    resetSequence(resetBtn.dataset.sequenceResetDevice, resetBtn);
   });
 
   state.list?.addEventListener('click', (ev) => {
@@ -228,6 +253,8 @@ function attachEvents() {
   state.detail?.addEventListener('change', handleDetailInput);
   state.detail?.addEventListener('click', handleDetailClick);
 
+  state.trackPickerModal?.addEventListener('click', handleTrackPickerClick);
+  state.trackPickerModal?.addEventListener('input', handleTrackPickerInput);
   state.wizardModal?.addEventListener('click', handleWizardClick);
   state.wizardModal?.addEventListener('input', handleWizardInput);
 }
@@ -249,12 +276,10 @@ function handleDetailClick(ev) {
   if (!btn) return;
   const action = btn.dataset.action;
   switch (action) {
-    case 'add-topic': addTopic(); break;
-    case 'remove-topic': removeTopic(btn.dataset.index); break;
     case 'add-scenario': addScenario(); break;
     case 'remove-scenario': removeScenario(btn.dataset.index); break;
     case 'select-scenario': selectScenario(btn.dataset.index); break;
-    case 'add-step': addStep(); break;
+    case 'add-step': addStep(btn.dataset.stepType); break;
     case 'remove-step': removeStep(btn.dataset.index); break;
     case 'step-up': moveStep(btn.dataset.index, -1); break;
     case 'step-down': moveStep(btn.dataset.index, 1); break;
@@ -270,6 +295,10 @@ function handleDetailClick(ev) {
     case 'condition-rule-remove': removeConditionRule(btn.dataset.index); break;
     case 'sequence-step-add': addSequenceStep(); break;
     case 'sequence-step-remove': removeSequenceStep(btn.dataset.index); break;
+    case 'template-new-scenario': addScenarioForReference(btn.dataset.templateField, btn.dataset.subfield, btn.dataset.index); break;
+    case 'wait-add-known-flag': addKnownWaitFlag(btn.dataset.stepIndex, btn.dataset.flag); break;
+    case 'track-picker-open': openTrackPicker(btn.closest('.dw-track-field')?.querySelector('input')); break;
+    case 'track-picker-clear': clearTrackField(btn.closest('.dw-track-field')?.querySelector('input')); break;
   }
 }
 
@@ -278,10 +307,6 @@ function handleDetailInput(ev) {
   if (!el) return;
   if (el.dataset.deviceField) {
     updateDeviceField(el.dataset.deviceField, el.value);
-    return;
-  }
-  if (el.dataset.topicField) {
-    updateTopicField(el.dataset.index, el.dataset.topicField, el.value);
     return;
   }
   if (el.dataset.scenarioField) {

@@ -273,7 +273,6 @@ function buildDeviceFromWizard() {
   const base = {
     id: id || slugify(name),
     display_name: name || 'Device',
-    topics: [],
     scenarios: [],
   };
   if (typeof tpl.build === 'function') {

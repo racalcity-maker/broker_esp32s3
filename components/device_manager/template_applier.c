@@ -109,7 +109,6 @@ static void init_scenario(device_descriptor_t *dev,
 
 static esp_err_t apply_uid_template(device_descriptor_t *dev, const dm_uid_template_t *tpl)
 {
-    dev->topic_count = 0;
     dev->scenario_count = 0;
 
     return ESP_OK;
@@ -117,7 +116,6 @@ static esp_err_t apply_uid_template(device_descriptor_t *dev, const dm_uid_templ
 
 static esp_err_t apply_signal_template(device_descriptor_t *dev, const dm_signal_hold_template_t *tpl)
 {
-    dev->topic_count = 0;
     dev->scenario_count = 0;
 
     if (dev->scenario_count >= DEVICE_MANAGER_MAX_SCENARIOS_PER_DEVICE) {

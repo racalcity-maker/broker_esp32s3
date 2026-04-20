@@ -12,7 +12,7 @@ function renderDeviceList() {
   }
   state.list.innerHTML = devices.map((dev, idx) => {
     const active = idx === state.selectedDevice ? ' active' : '';
-    const name = escapeHtml(dev.display_name || dev.name || dev.id || ('Device ' + (idx + 1)));
+    const name = escapeHtml(dev.display_name || dev.id || ('Device ' + (idx + 1)));
     const scenarios = (dev.scenarios || []).length;
     return `<div class="dw-device-item${active}" data-device-index="${idx}">
       <span>${name}</span>
@@ -38,15 +38,168 @@ function renderDeviceDetail() {
       </div>
       <div class="dw-field">
         <label>Display name</label>
-        <input data-device-field="display_name" value="${escapeAttr(dev.display_name || dev.name || '')}" placeholder="Visible name">
+        <input data-device-field="display_name" value="${escapeAttr(dev.display_name || '')}" placeholder="Visible name">
       </div>
     </div>
   ${renderTemplateSection(dev)}
-  ${renderTopicsSection(dev)}
   ${renderScenariosSection(dev)}
+  ${renderFlagLookupDatalist(dev)}
   `;
   validateRequiredFields();
   refreshTrackPickers();
+}
+
+function renderTrackField(label, attrs, value, placeholder) {
+  return `
+    <div class="dw-field">
+      <label>${escapeHtml(label)}</label>
+      <div class="dw-track-field">
+        <input ${attrs} value="${escapeAttr(value || '')}" placeholder="${escapeAttr(placeholder || '')}">
+        <button class="secondary small" type="button" data-action="track-picker-open">Choose</button>
+        <button class="secondary small" type="button" data-action="track-picker-clear">Clear</button>
+      </div>
+    </div>`;
+}
+
+function collectKnownFlags(dev) {
+  const flags = new Set();
+  const addFlag = (value) => {
+    const flag = toSafeString(value).trim();
+    if (flag) {
+      flags.add(flag);
+    }
+  };
+  if (!dev || typeof dev !== 'object') {
+    return [];
+  }
+  (dev.template?.flag?.rules || []).forEach((rule) => addFlag(rule?.flag));
+  (dev.template?.condition?.rules || []).forEach((rule) => addFlag(rule?.flag));
+  (dev.scenarios || []).forEach((scen) => {
+    (scen?.steps || []).forEach((step) => {
+      if (step?.type === 'set_flag') {
+        addFlag(step?.data?.flag?.flag || step?.flag);
+      } else if (step?.type === 'wait_flags') {
+        (step?.data?.wait_flags?.requirements || []).forEach((req) => addFlag(req?.flag));
+      }
+    });
+  });
+  return Array.from(flags).sort((a, b) => a.localeCompare(b));
+}
+
+function renderFlagLookupDatalist(dev) {
+  const flags = collectKnownFlags(dev);
+  if (!flags.length) {
+    return '';
+  }
+  const options = flags.map((flag) => `<option value="${escapeAttr(flag)}"></option>`).join('');
+  return `<datalist id="flag_lookup">${options}</datalist>`;
+}
+
+function collectTemplateScenarioRefs(dev) {
+  const refs = new Map();
+  if (!dev || !dev.template) {
+    return refs;
+  }
+  const addRef = (scenarioId, source) => {
+    const id = toSafeString(scenarioId).trim();
+    if (!id) {
+      return;
+    }
+    if (!refs.has(id)) {
+      refs.set(id, {sources: []});
+    }
+    const ref = refs.get(id);
+    if (!ref.sources.includes(source)) {
+      ref.sources.push(source);
+    }
+  };
+
+  switch (dev.template.type) {
+    case 'on_mqtt_event':
+      (dev.template.mqtt?.rules || []).forEach((rule, idx) => addRef(rule?.scenario, `MQTT trigger ${idx + 1}`));
+      break;
+    case 'on_flag':
+      (dev.template.flag?.rules || []).forEach((rule, idx) => addRef(rule?.scenario, `Flag trigger ${idx + 1}`));
+      break;
+    case 'if_condition':
+      addRef(dev.template.condition?.true_scenario, 'Condition branch: TRUE');
+      addRef(dev.template.condition?.false_scenario, 'Condition branch: FALSE');
+      break;
+    case 'interval_task':
+      addRef(dev.template.interval?.scenario, 'Interval action');
+      break;
+    case 'sequence_lock':
+      addRef(dev.template.sequence?.success_scenario, 'Sequence result: success');
+      addRef(dev.template.sequence?.fail_scenario, 'Sequence result: fail');
+      break;
+    default:
+      break;
+  }
+
+  return refs;
+}
+
+function renderScenarioBadges(meta) {
+  const badges = [];
+  if (meta?.templateLinked) {
+    badges.push(`<span class="dw-chip required">required</span>`);
+    badges.push(`<span class="dw-chip linked">used by template</span>`);
+  } else {
+    badges.push(`<span class="dw-chip manual">manual</span>`);
+  }
+  return badges.join('');
+}
+
+function collectScenarioUsage(dev, scen) {
+  const usage = [];
+  const scenarioId = toSafeString(scen?.id).trim();
+  if (!dev || !scenarioId) {
+    return usage;
+  }
+  const templateRef = collectTemplateScenarioRefs(dev).get(scenarioId);
+  if (templateRef?.sources?.length) {
+    templateRef.sources.forEach((source) => usage.push(source));
+  }
+  if (scen?.button_enabled) {
+    usage.push('Actions tab button');
+  }
+  return usage;
+}
+
+function renderScenarioListGroup(title, items) {
+  return `
+    <div class="dw-scenario-group">
+      <div class="dw-scenario-group-title">${escapeHtml(title)}</div>
+      ${items || "<div class='dw-list-empty'>No scenarios</div>"}
+    </div>`;
+}
+
+function renderScenarioRefField(dev, label, field, subfield, value, index) {
+  const scenarios = Array.isArray(dev?.scenarios) ? dev.scenarios : [];
+  const currentValue = toSafeString(value);
+  const options = [`<option value="">Select scenario</option>`].concat(
+    scenarios.map((scen) => {
+      const scenarioId = toSafeString(scen?.id).trim();
+      if (!scenarioId) {
+        return '';
+      }
+      const scenarioName = toSafeString(scen?.name).trim();
+      const optionLabel = scenarioName && scenarioName !== scenarioId
+        ? `${scenarioName} (${scenarioId})`
+        : scenarioId;
+      return `<option value="${escapeAttr(scenarioId)}" ${scenarioId === currentValue ? 'selected' : ''}>${escapeHtml(optionLabel)}</option>`;
+    }).filter(Boolean)
+  ).join('');
+  const safeIndex = typeof index === 'number' && !Number.isNaN(index) ? ` data-index="${index}"` : '';
+  return `
+    <div class="dw-field">
+      <label>${label}</label>
+      <div class="dw-inline-actions">
+        <select data-template-field="${field}" data-subfield="${subfield}"${safeIndex}>${options}</select>
+        <button class="secondary small" type="button" data-action="template-new-scenario" data-template-field="${field}" data-subfield="${subfield}"${safeIndex}>+ New</button>
+      </div>
+      <div class="dw-hint small">Uses scenarios from this device. Manual ID stays in the scenario editor.</div>
+    </div>`;
 }
 
 function validateRequiredFields() {
@@ -72,6 +225,7 @@ function validateRequiredFields() {
 function renderTemplateSection(dev) {
   const tplType = dev.template?.type || '';
   const options = TEMPLATE_TYPES.map((tpl) => `<option value="${tpl.value}" ${tpl.value === tplType ? 'selected' : ''}>${tpl.label}</option>`).join('');
+  const hint = templateTypeHint(tplType);
   let body = "<div class='dw-empty small'>Template is not set.</div>";
   if (tplType === 'uid_validator') {
     body = renderUidTemplate(dev);
@@ -96,9 +250,31 @@ function renderTemplateSection(dev) {
       <div class="dw-field">
         <label>Template type</label>
         <select data-template-field="type">${options}</select>
+        <div class="dw-hint small">${escapeHtml(hint)}</div>
       </div>
       ${body}
     </div>`;
+}
+
+function templateTypeHint(type) {
+  switch (type) {
+    case 'uid_validator':
+      return 'Validate UID input, react to success or failure, and optionally control background audio.';
+    case 'signal_hold':
+      return 'Keep a signal active for a period and optionally play hold or completion audio.';
+    case 'on_mqtt_event':
+      return 'Watch MQTT messages and launch scenarios when a trigger rule matches.';
+    case 'on_flag':
+      return 'Watch automation flags and run scenarios when a flag trigger matches.';
+    case 'if_condition':
+      return 'Evaluate a condition and branch into TRUE or FALSE scenarios.';
+    case 'interval_task':
+      return 'Run one scenario on a fixed interval.';
+    case 'sequence_lock':
+      return 'Guide a multi-step sequence with success and failure branches.';
+    default:
+      return 'Choose a template if this device should react automatically instead of only exposing manual scenarios.';
+  }
 }
 
 function renderUidTemplate(dev) {
@@ -148,13 +324,13 @@ function renderUidTemplate(dev) {
       <h5>Success actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="uid-action" data-subfield="success_topic" value="${escapeAttr(tpl.success_topic || '')}" placeholder="quest/ok"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="uid-action" data-subfield="success_payload" value="${escapeAttr(tpl.success_payload || '')}" placeholder="payload"></div>
-      <div class="dw-field"><label>Audio track</label><input data-template-field="uid-action" data-subfield="success_audio_track" value="${escapeAttr(tpl.success_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/ok.mp3" list="track_lookup"></div>
+      ${renderTrackField('Audio track', `data-template-field="uid-action" data-subfield="success_audio_track"`, tpl.success_audio_track || '', `${TRACK_LOOKUP_ROOT}/ok.mp3`)}
     </div>
     <div class="dw-section">
       <h5>Fail actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="uid-action" data-subfield="fail_topic" value="${escapeAttr(tpl.fail_topic || '')}" placeholder="quest/fail"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="uid-action" data-subfield="fail_payload" value="${escapeAttr(tpl.fail_payload || '')}" placeholder="payload"></div>
-      <div class="dw-field"><label>Audio track</label><input data-template-field="uid-action" data-subfield="fail_audio_track" value="${escapeAttr(tpl.fail_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/fail.mp3" list="track_lookup"></div>
+      ${renderTrackField('Audio track', `data-template-field="uid-action" data-subfield="fail_audio_track"`, tpl.fail_audio_track || '', `${TRACK_LOOKUP_ROOT}/fail.mp3`)}
     </div>`;
 }
 
@@ -171,9 +347,9 @@ function renderSignalTemplate(dev) {
       <div class="dw-field"><label>Reset topic</label><input data-template-field="signal" data-subfield="reset_topic" value="${escapeAttr(sig.reset_topic || '')}" placeholder="laser/reset"><div class="dw-hint small">Опубликуйте любое сообщение сюда, чтобы остановить трек и обнулить прогресс удержания.</div></div>
       <div class="dw-field required"><label>Required hold ms</label><input type="number" data-template-field="signal" data-subfield="required_hold_ms" value="${sig.required_hold_ms || 0}" data-required="true" data-required-rule="positive"><div class="dw-hint small">Минимальная длительность удержания в миллисекундах.</div></div>
       <div class="dw-field"><label>Heartbeat timeout ms</label><input type="number" data-template-field="signal" data-subfield="heartbeat_timeout_ms" value="${sig.heartbeat_timeout_ms || 0}"></div>
-      <div class="dw-field"><label>Hold track</label><input data-template-field="signal" data-subfield="hold_track" value="${escapeAttr(sig.hold_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/hold.mp3" list="track_lookup"></div>
+      ${renderTrackField('Hold track', `data-template-field="signal" data-subfield="hold_track"`, sig.hold_track || '', `${TRACK_LOOKUP_ROOT}/hold.mp3`)}
       <div class="dw-field"><label>Loop hold track</label><select data-template-field="signal" data-subfield="hold_track_loop"><option value="false" ${sig.hold_track_loop ? '' : 'selected'}>No</option><option value="true" ${sig.hold_track_loop ? 'selected' : ''}>Yes</option></select></div>
-      <div class="dw-field"><label>Complete track</label><input data-template-field="signal" data-subfield="complete_track" value="${escapeAttr(sig.complete_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/done.mp3" list="track_lookup"></div>
+      ${renderTrackField('Complete track', `data-template-field="signal" data-subfield="complete_track"`, sig.complete_track || '', `${TRACK_LOOKUP_ROOT}/done.mp3`)}
     </div>`;
 }
 
@@ -182,24 +358,31 @@ function renderMqttTemplate(dev) {
   const tpl = dev.template?.mqtt || {rules: []};
   const rules = (tpl.rules || []).map((rule, idx) => {
     const checked = rule.payload_required ? 'checked' : '';
+    const topicText = toSafeString(rule.topic).trim() || 'any topic';
+    const payloadText = rule.payload_required
+      ? (toSafeString(rule.payload).trim() || 'exact payload')
+      : 'any payload';
+    const scenarioText = toSafeString(rule.scenario).trim() || 'no scenario selected';
     return `
     <div class="dw-slot">
-      <div class="dw-slot-head">Rule ${idx + 1}<button class="danger small" data-action="mqtt-rule-remove" data-index="${idx}">&times;</button></div>
-      <div class="dw-field"><label>Name</label><input data-template-field="mqtt-rule" data-subfield="name" data-index="${idx}" value="${escapeAttr(rule.name || '')}" placeholder="Optional"></div>
-      <div class="dw-field"><label>Topic</label><input data-template-field="mqtt-rule" data-subfield="topic" data-index="${idx}" value="${escapeAttr(rule.topic || '')}" placeholder="sensor/topic"></div>
-      <div class="dw-field"><label>Payload</label><input data-template-field="mqtt-rule" data-subfield="payload" data-index="${idx}" value="${escapeAttr(rule.payload || '')}" placeholder="payload"></div>
-      <div class="dw-field dw-checkbox-field"><label><input type="checkbox" data-template-field="mqtt-rule" data-subfield="payload_required" data-index="${idx}" ${checked}>Match payload</label></div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="mqtt-rule" data-subfield="scenario" data-index="${idx}" value="${escapeAttr(rule.scenario || '')}" placeholder="scenario_id"></div>
+      <div class="dw-slot-head">MQTT trigger ${idx + 1}<button class="danger small" data-action="mqtt-rule-remove" data-index="${idx}">&times;</button></div>
+      <div class="dw-hint small">When topic <strong>${escapeHtml(topicText)}</strong> arrives with <strong>${escapeHtml(payloadText)}</strong>, run <strong>${escapeHtml(scenarioText)}</strong>.</div>
+      <div class="dw-field"><label>Trigger label</label><input data-template-field="mqtt-rule" data-subfield="name" data-index="${idx}" value="${escapeAttr(rule.name || '')}" placeholder="Optional note for this trigger"></div>
+      <div class="dw-field required"><label>Topic filter</label><input data-template-field="mqtt-rule" data-subfield="topic" data-index="${idx}" value="${escapeAttr(rule.topic || '')}" placeholder="sensor/topic" data-required="true"></div>
+      <div class="dw-field"><label>Payload filter</label><input data-template-field="mqtt-rule" data-subfield="payload" data-index="${idx}" value="${escapeAttr(rule.payload || '')}" placeholder="payload"></div>
+      <div class="dw-field dw-checkbox-field"><label><input type="checkbox" data-template-field="mqtt-rule" data-subfield="payload_required" data-index="${idx}" ${checked}>Require payload match</label></div>
+      ${renderScenarioRefField(dev, 'Run scenario', 'mqtt-rule', 'scenario', rule.scenario || '', idx)}
     </div>`;
   }).join('');
   return `
     <div class="dw-section">
       <div class="dw-section-head">
-        <span>MQTT rules</span>
-        <button data-action="mqtt-rule-add">Add rule</button>
+        <span>MQTT triggers</span>
+        <button data-action="mqtt-rule-add">Add trigger</button>
       </div>
+      <div class="dw-hint small">Use this template for inbound MQTT-driven scenarios. It replaces the old per-device topic bindings.</div>
       ${rules || "<div class='dw-empty small'>No rules configured.</div>"}
-      <div class="dw-hint small">Leave payload empty to match any payload.</div>
+      <div class="dw-hint small">Leave payload filtering disabled to react to any payload on the selected topic.</div>
     </div>`;
 }
 
@@ -219,7 +402,7 @@ function renderFlagTemplate(dev) {
           <option value="false" ${!rule.required_state ? 'selected' : ''}>Flag becomes FALSE</option>
         </select>
       </div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="flag-rule" data-subfield="scenario" data-index="${idx}" value="${escapeAttr(rule.scenario || '')}" placeholder="scenario_id"></div>
+      ${renderScenarioRefField(dev, 'Scenario', 'flag-rule', 'scenario', rule.scenario || '', idx)}
     </div>`;
   }).join('');
   return `
@@ -258,8 +441,8 @@ function renderConditionTemplate(dev) {
           <option value="any" ${tpl.mode === 'any' ? 'selected' : ''}>Any condition</option>
         </select>
       </div>
-      <div class="dw-field"><label>Scenario if TRUE</label><input data-template-field="condition-scenario" data-subfield="true" value="${escapeAttr(tpl.true_scenario || '')}" placeholder="scenario_true"></div>
-      <div class="dw-field"><label>Scenario if FALSE</label><input data-template-field="condition-scenario" data-subfield="false" value="${escapeAttr(tpl.false_scenario || '')}" placeholder="scenario_false"></div>
+      ${renderScenarioRefField(dev, 'Scenario if TRUE', 'condition-scenario', 'true', tpl.true_scenario || '')}
+      ${renderScenarioRefField(dev, 'Scenario if FALSE', 'condition-scenario', 'false', tpl.false_scenario || '')}
     </div>
     <div class="dw-section">
       <div class="dw-section-head">
@@ -279,7 +462,7 @@ function renderIntervalTemplate(dev) {
     <div class="dw-section">
       <div class="dw-section-head"><span>Interval task</span></div>
       <div class="dw-field"><label>Interval (ms)</label><input type="number" min="1" data-template-field="interval" data-subfield="interval_ms" value="${intervalMs}"></div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="interval" data-subfield="scenario" value="${escapeAttr(tpl.scenario || '')}" placeholder="scenario_id"></div>
+      ${renderScenarioRefField(dev, 'Scenario', 'interval', 'scenario', tpl.scenario || '')}
       <div class="dw-hint small">Runs the selected scenario on a fixed interval.</div>
     </div>`;
 }
@@ -297,7 +480,7 @@ function renderSequenceTemplate(dev) {
         <div class="dw-field dw-checkbox-field"><label><input type="checkbox" data-template-field="sequence-step" data-subfield="payload_required" data-index="${idx}" ${checked}>Require exact payload</label></div>
         <div class="dw-field"><label>Hint topic</label><input data-template-field="sequence-step" data-subfield="hint_topic" data-index="${idx}" value="${escapeAttr(step.hint_topic || '')}" placeholder="hint/topic"></div>
         <div class="dw-field"><label>Hint payload</label><input data-template-field="sequence-step" data-subfield="hint_payload" data-index="${idx}" value="${escapeAttr(step.hint_payload || '')}" placeholder="payload"></div>
-        <div class="dw-field"><label>Hint audio track</label><input data-template-field="sequence-step" data-subfield="hint_audio_track" data-index="${idx}" value="${escapeAttr(step.hint_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/hint.mp3" list="track_lookup"></div>
+        ${renderTrackField('Hint audio track', `data-template-field="sequence-step" data-subfield="hint_audio_track" data-index="${idx}"`, step.hint_audio_track || '', `${TRACK_LOOKUP_ROOT}/hint.mp3`)}
       </div>`;
   }).join('');
   return `
@@ -317,48 +500,41 @@ function renderSequenceTemplate(dev) {
       <h5>Success actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="sequence" data-subfield="success_topic" value="${escapeAttr(tpl.success_topic || '')}" placeholder="quest/sequence/success"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="sequence" data-subfield="success_payload" value="${escapeAttr(tpl.success_payload || '')}" placeholder="payload"></div>
-      <div class="dw-field"><label>Audio track</label><input data-template-field="sequence" data-subfield="success_audio_track" value="${escapeAttr(tpl.success_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/success.mp3" list="track_lookup"></div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="sequence" data-subfield="success_scenario" value="${escapeAttr(tpl.success_scenario || '')}" placeholder="scenario_success"></div>
+      ${renderTrackField('Audio track', `data-template-field="sequence" data-subfield="success_audio_track"`, tpl.success_audio_track || '', `${TRACK_LOOKUP_ROOT}/success.mp3`)}
+      ${renderScenarioRefField(dev, 'Scenario', 'sequence', 'success_scenario', tpl.success_scenario || '')}
     </div>
     <div class="dw-section">
       <h5>Fail actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="sequence" data-subfield="fail_topic" value="${escapeAttr(tpl.fail_topic || '')}" placeholder="quest/sequence/fail"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="sequence" data-subfield="fail_payload" value="${escapeAttr(tpl.fail_payload || '')}" placeholder="payload"></div>
-      <div class="dw-field"><label>Audio track</label><input data-template-field="sequence" data-subfield="fail_audio_track" value="${escapeAttr(tpl.fail_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/fail.mp3" list="track_lookup"></div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="sequence" data-subfield="fail_scenario" value="${escapeAttr(tpl.fail_scenario || '')}" placeholder="scenario_fail"></div>
+      ${renderTrackField('Audio track', `data-template-field="sequence" data-subfield="fail_audio_track"`, tpl.fail_audio_track || '', `${TRACK_LOOKUP_ROOT}/fail.mp3`)}
+      ${renderScenarioRefField(dev, 'Scenario', 'sequence', 'fail_scenario', tpl.fail_scenario || '')}
       <div class="dw-hint small">Failure actions run when timeout expires or an unexpected topic arrives.</div>
     </div>`;
 }
 
-function renderTopicsSection(dev) {
-  const rows = (dev.topics || []).map((topic, idx) => `
-    <tr>
-      <td><input data-topic-field="name" data-index="${idx}" value="${escapeAttr(topic.name || '')}" placeholder="Name"></td>
-      <td><input data-topic-field="topic" data-index="${idx}" value="${escapeAttr(topic.topic || '')}" placeholder="mqtt/topic"></td>
-      <td><button class="danger small" data-action="remove-topic" data-index="${idx}">&times;</button></td>
-    </tr>`).join('');
-  return `
-    <div class="dw-section">
-      <div class="dw-section-head">
-        <h4>Topics</h4>
-        <div class="dw-table-actions"><button data-action="add-topic">Add topic</button></div>
-      </div>
-      <table class="dw-mini-table">
-        <thead><tr><th>Name</th><th>Topic</th><th></th></tr></thead>
-        <tbody>${rows || "<tr><td colspan='3' class='muted small'>No topics</td></tr>"}</tbody>
-      </table>
-    </div>`;
-}
-
 function renderScenariosSection(dev) {
-  const items = (dev.scenarios || []).map((sc, idx) => {
+  const templateRefs = collectTemplateScenarioRefs(dev);
+  const templateItems = [];
+  const customItems = [];
+  (dev.scenarios || []).forEach((sc, idx) => {
     const active = idx === state.selectedScenario ? ' active' : '';
     const title = escapeHtml(sc.name || sc.id || ('Scenario ' + (idx + 1)));
-    return `<div class="dw-scenario-item${active}" data-action="select-scenario" data-index="${idx}">
-      <span>${title}</span>
+    const scenarioId = toSafeString(sc?.id).trim();
+    const refMeta = scenarioId ? templateRefs.get(scenarioId) : null;
+    const item = `<div class="dw-scenario-item${active}" data-action="select-scenario" data-index="${idx}">
+      <div class="dw-scenario-main">
+        <span>${title}</span>
+        <div class="dw-chip-row">${renderScenarioBadges({templateLinked: !!refMeta})}</div>
+      </div>
       <span class="dw-badge">${(sc.steps || []).length}</span>
     </div>`;
-  }).join('');
+    if (refMeta) {
+      templateItems.push(item);
+    } else {
+      customItems.push(item);
+    }
+  });
   return `
     <div class="dw-section">
       <div class="dw-scenarios">
@@ -367,7 +543,8 @@ function renderScenariosSection(dev) {
             <button data-action="add-scenario">Add</button>
             <button class="danger" data-action="remove-scenario" data-index="${state.selectedScenario}">Delete</button>
           </div>
-          ${items || "<div class='dw-list-empty'>No scenarios</div>"}
+          ${renderScenarioListGroup('Template scenarios', templateItems.join(''))}
+          ${renderScenarioListGroup('Custom scenarios', customItems.join(''))}
         </div>
         <div class="dw-scenario-detail">
           ${renderScenarioDetail()}
@@ -378,11 +555,55 @@ function renderScenariosSection(dev) {
 
 function renderScenarioDetail() {
   const scen = currentScenario();
+  const dev = currentDevice();
   if (!scen) {
     return "<div class='dw-empty'>Select a scenario to edit.</div>";
   }
+  const scenarioId = toSafeString(scen.id).trim();
+  const refMeta = scenarioId ? collectTemplateScenarioRefs(dev).get(scenarioId) : null;
+  const usage = collectScenarioUsage(dev, scen);
   const steps = (scen.steps || []).map((step, idx) => renderStep(step, idx)).join('');
+  const stepPresetGroups = [
+    {title: 'Messaging', items: [
+      ['mqtt_publish', 'MQTT', 'Publish topic and payload'],
+      ['event', 'Event', 'Send internal bus event'],
+    ]},
+    {title: 'Audio', items: [
+      ['audio_play', 'Audio Play', 'Start track playback'],
+      ['audio_stop', 'Audio Stop', 'Stop current audio'],
+    ]},
+    {title: 'Control', items: [
+      ['set_flag', 'Set Flag', 'Update automation flag'],
+      ['wait_flags', 'Wait Flags', 'Pause until flags match'],
+    ]},
+    {title: 'Logic', items: [
+      ['delay', 'Delay', 'Wait fixed time before next step'],
+      ['loop', 'Loop', 'Jump back to earlier step'],
+    ]},
+  ].map((group) => {
+    const buttons = group.items
+      .map(([type, label, desc]) => `<button class="dw-step-preset-btn" type="button" data-action="add-step" data-step-type="${type}">
+        <span class="dw-step-preset-label">+ ${escapeHtml(label)}</span>
+        <span class="dw-step-preset-desc">${escapeHtml(desc)}</span>
+      </button>`)
+      .join('');
+    return `<div class="dw-step-preset-group">
+      <div class="dw-step-preset-title">${escapeHtml(group.title)}</div>
+      <div class="dw-step-presets">${buttons}</div>
+    </div>`;
+  }).join('');
   return `
+    <div class="dw-field">
+      <label>Scenario type</label>
+      <div class="dw-chip-row">${renderScenarioBadges({templateLinked: !!refMeta})}</div>
+      ${refMeta ? `<div class="dw-hint small">Linked from: ${escapeHtml(refMeta.sources.join(', '))}</div>` : "<div class='dw-hint small'>Custom scenario not referenced by the current template.</div>"}
+    </div>
+    <div class="dw-field">
+      <label>Used by</label>
+      ${usage.length
+        ? `<div class="dw-usage-list">${usage.map((item) => `<div class="dw-usage-item">${escapeHtml(item)}</div>`).join('')}</div>`
+        : "<div class='dw-empty small'>Not referenced</div>"}
+    </div>
     <div class="dw-field">
       <label>Scenario ID</label>
       <input data-scenario-field="id" value="${escapeAttr(scen.id || '')}" placeholder="scenario_id">
@@ -399,19 +620,101 @@ function renderScenarioDetail() {
       <input data-scenario-field="button_label" value="${escapeAttr(scen.button_label || scen.name || scen.id || '')}" placeholder="Friendly label" ${scen.button_enabled ? '' : 'disabled'}>
     </div>
     <div class="dw-step-footer">
-      <button class="secondary" data-action="add-step">Add step</button>
+      <div class="dw-step-preset-panel">${stepPresetGroups}</div>
       <span class="dw-note">Steps execute sequentially; use loops and waits for advanced flows.</span>
     </div>
     <div>${steps || "<div class='dw-empty'>No steps</div>"}</div>
   `;
 }
 
+function stepTypeLabel(type) {
+  switch (type) {
+    case 'mqtt_publish': return 'Publish MQTT';
+    case 'audio_play': return 'Play audio';
+    case 'audio_stop': return 'Stop audio';
+    case 'set_flag': return 'Set flag';
+    case 'wait_flags': return 'Wait for flags';
+    case 'loop': return 'Loop';
+    case 'delay': return 'Delay';
+    case 'event': return 'Emit event';
+    case 'nop':
+    default:
+      return 'No operation';
+  }
+}
+
+function stepSummary(step) {
+  const type = step?.type || 'nop';
+  switch (type) {
+    case 'mqtt_publish': {
+      const topic = toSafeString(step?.data?.mqtt?.topic).trim();
+      const payload = toSafeString(step?.data?.mqtt?.payload).trim();
+      if (topic && payload) return `${topic} -> ${payload}`;
+      if (topic) return topic;
+      return 'Topic and payload';
+    }
+    case 'audio_play': {
+      const track = toSafeString(step?.data?.audio?.track).trim();
+      return track || 'Track playback';
+    }
+    case 'audio_stop':
+      return 'Stop current audio output';
+    case 'set_flag': {
+      const flag = toSafeString(step?.data?.flag?.flag).trim() || 'flag';
+      const value = step?.data?.flag?.value ? 'true' : 'false';
+      return `${flag} = ${value}`;
+    }
+    case 'wait_flags': {
+      const reqs = Array.isArray(step?.data?.wait_flags?.requirements) ? step.data.wait_flags.requirements : [];
+      const mode = step?.data?.wait_flags?.mode === 'any' ? 'any' : 'all';
+      if (!reqs.length) {
+        return `Wait for ${mode} conditions`;
+      }
+      if (reqs.length === 1) {
+        const req = reqs[0] || {};
+        const flag = toSafeString(req.flag).trim() || 'flag';
+        return `${flag} = ${req.required_state ? 'true' : 'false'}`;
+      }
+      return `Wait for ${mode} of ${reqs.length} flags`;
+    }
+    case 'loop': {
+      const target = parseInt(step?.data?.loop?.target_step, 10);
+      const maxIterations = parseInt(step?.data?.loop?.max_iterations, 10);
+      const targetText = Number.isNaN(target) ? 'previous step' : `step ${target + 1}`;
+      if (!Number.isNaN(maxIterations) && maxIterations > 0) {
+        return `Back to ${targetText}, max ${maxIterations} times`;
+      }
+      return `Back to ${targetText}`;
+    }
+    case 'delay': {
+      const delayMs = parseInt(step?.delay_ms, 10);
+      return `${Number.isNaN(delayMs) ? 0 : delayMs} ms`;
+    }
+    case 'event': {
+      const eventName = toSafeString(step?.data?.event?.event).trim();
+      const topic = toSafeString(step?.data?.event?.topic).trim();
+      if (eventName && topic) return `${eventName} on ${topic}`;
+      if (eventName) return eventName;
+      return 'Internal event';
+    }
+    case 'nop':
+    default:
+      return 'No action';
+  }
+}
+
 function renderStep(step, idx) {
-  const options = ACTION_TYPES.map((type) => `<option value="${type}" ${type === step.type ? 'selected' : ''}>${type}</option>`).join('');
+  const options = ACTION_TYPES.map((type) => `<option value="${type}" ${type === step.type ? 'selected' : ''}>${escapeHtml(stepTypeLabel(type))}</option>`).join('');
+  const title = stepTypeLabel(step.type || 'nop');
+  const summary = stepSummary(step);
   return `
     <div class="dw-step-card">
       <div class="dw-step-head">
-        <h5>Step ${idx + 1}</h5>
+        <div class="dw-step-title-wrap">
+          <h5>${escapeHtml(title)}</h5>
+          <div class="dw-step-summary">${escapeHtml(summary)}</div>
+          <span class="dw-step-index">Step ${idx + 1}</span>
+        </div>
         <div class="dw-step-head-controls">
           <button data-action="step-up" data-index="${idx}">&uarr;</button>
           <button data-action="step-down" data-index="${idx}">&darr;</button>
@@ -445,31 +748,71 @@ function renderStepFields(step, idx) {
     case 'audio_play':
       ensure(step, ['data','audio']);
       return `
-        <div class="dw-field"><label>Track path</label><input data-step-field="data.audio.track" data-index="${idx}" value="${escapeAttr(step.data.audio.track || '')}" list="track_lookup"></div>
+        ${renderTrackField('Track path', `data-step-field="data.audio.track" data-index="${idx}"`, step.data.audio.track || '', `${TRACK_LOOKUP_ROOT}/track.mp3`)}
         <div class="dw-field"><label>Blocking</label><select data-step-field="data.audio.blocking" data-index="${idx}"><option value="false" ${step.data.audio.blocking?'':'selected'}>No</option><option value="true" ${step.data.audio.blocking?'selected':''}>Yes</option></select></div>`;
     case 'set_flag':
       ensure(step, ['data','flag']);
       return `
-        <div class="dw-field"><label>Flag name</label><input data-step-field="data.flag.flag" data-index="${idx}" value="${escapeAttr(step.data.flag.flag || '')}"></div>
+        <div class="dw-field"><label>Flag name</label><input data-step-field="data.flag.flag" data-index="${idx}" value="${escapeAttr(step.data.flag.flag || '')}" list="flag_lookup"></div>
         <div class="dw-field"><label>Value</label><select data-step-field="data.flag.value" data-index="${idx}"><option value="true" ${step.data.flag.value?'selected':''}>True</option><option value="false" ${step.data.flag.value?'':'selected'}>False</option></select></div>`;
     case 'wait_flags':
       ensure(step, ['data','wait_flags']);
       ensure(step.data.wait_flags, ['requirements']);
+      const waitMode = step.data.wait_flags.mode === 'any' ? 'any' : 'all';
+      const waitModeText = waitMode === 'any' ? 'Wait until any condition matches' : 'Wait until all conditions match';
+      const knownFlags = collectKnownFlags(currentDevice());
+      const knownFlagsHint = knownFlags.length
+        ? `Known flags: ${escapeHtml(knownFlags.join(', '))}`
+        : 'No known flags yet. Add flags in steps or template rules first.';
+      const knownFlagButtons = knownFlags.map((flag) => `
+        <button class="dw-flag-chip-btn" type="button" data-action="wait-add-known-flag" data-step-index="${idx}" data-flag="${escapeAttr(flag)}">
+          + ${escapeHtml(flag)}
+        </button>`).join('');
+      const reqSummary = (step.data.wait_flags.requirements || []).map((req) => {
+        const flag = escapeHtml(req.flag || 'flag');
+        const stateLabel = req.required_state ? 'true' : 'false';
+        return `<span class="dw-wait-chip">${flag} = ${stateLabel}</span>`;
+      }).join('');
       const reqs = (step.data.wait_flags.requirements || []).map((req, rIdx) => `
-        <div class="dw-wait-row">
-          <input placeholder="flag" data-wait-field="flag" data-step-index="${idx}" data-req-index="${rIdx}" value="${escapeAttr(req.flag || '')}">
-          <select data-wait-field="state" data-step-index="${idx}" data-req-index="${rIdx}">
-            <option value="true" ${req.required_state?'selected':''}>True</option>
-            <option value="false" ${req.required_state?'':'selected'}>False</option>
-          </select>
-          <button data-action="remove-wait-rule" data-step-index="${idx}" data-req-index="${rIdx}">&times;</button>
+        <div class="dw-wait-card">
+          <div class="dw-wait-card-head">
+            <span class="dw-wait-card-title">${escapeHtml((req.flag || 'Flag').trim() || 'Flag')} = ${req.required_state ? 'true' : 'false'}</span>
+            <button data-action="remove-wait-rule" data-step-index="${idx}" data-req-index="${rIdx}">&times;</button>
+          </div>
+          <div class="dw-wait-row">
+            <input placeholder="flag name" list="flag_lookup" data-wait-field="flag" data-step-index="${idx}" data-req-index="${rIdx}" value="${escapeAttr(req.flag || '')}">
+            <select data-wait-field="state" data-step-index="${idx}" data-req-index="${rIdx}">
+              <option value="true" ${req.required_state?'selected':''}>true</option>
+              <option value="false" ${req.required_state?'':'selected'}>false</option>
+            </select>
+            <span class="dw-wait-preview">${escapeHtml((req.flag || 'flag').trim() || 'flag')} = ${req.required_state ? 'true' : 'false'}</span>
+          </div>
         </div>`).join('');
       return `
-        <div class="dw-field"><label>Mode</label><select data-step-field="data.wait_flags.mode" data-index="${idx}"><option value="all" ${step.data.wait_flags.mode==='all'?'selected':''}>All</option><option value="any" ${step.data.wait_flags.mode==='any'?'selected':''}>Any</option></select></div>
-        <div class="dw-field"><label>Timeout ms</label><input type="number" data-step-field="data.wait_flags.timeout_ms" data-index="${idx}" value="${step.data.wait_flags.timeout_ms || 0}"></div>
-        <div class="dw-field"><label>Requirements</label>
-          <div class="dw-wait-req">${reqs || "<div class='dw-empty small'>No requirements</div>"}</div>
-          <button class="secondary" data-action="add-wait-rule" data-step-index="${idx}">Add requirement</button>
+        <div class="dw-field">
+          <label>Wait until</label>
+          <div class="dw-wait-panel">
+            <div class="dw-wait-panel-head">
+              <div class="dw-wait-headline">${waitModeText}</div>
+              <div class="dw-wait-summary">${reqSummary || "<span class='dw-empty small'>No requirements yet</span>"}</div>
+            </div>
+            <div class="dw-wait-settings">
+              <div class="dw-field"><label>Mode</label><select data-step-field="data.wait_flags.mode" data-index="${idx}">
+                <option value="all" ${waitMode==='all'?'selected':''}>All conditions</option>
+                <option value="any" ${waitMode==='any'?'selected':''}>Any condition</option>
+              </select></div>
+              <div class="dw-field"><label>Timeout ms</label><input type="number" data-step-field="data.wait_flags.timeout_ms" data-index="${idx}" value="${step.data.wait_flags.timeout_ms || 0}"></div>
+            </div>
+            <div class="dw-hint small">${knownFlagsHint}</div>
+            ${knownFlagButtons ? `<div class="dw-known-flags">
+              <div class="dw-known-flags-title">Use existing flags</div>
+              <div class="dw-known-flags-list">${knownFlagButtons}</div>
+            </div>` : ''}
+            <div class="dw-field"><label>Requirements</label>
+              <div class="dw-wait-req">${reqs || "<div class='dw-empty small'>No requirements</div>"}</div>
+              <button class="secondary" data-action="add-wait-rule" data-step-index="${idx}">Add requirement</button>
+            </div>
+          </div>
         </div>`;
     case 'loop':
       ensure(step, ['data','loop']);

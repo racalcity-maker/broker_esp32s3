@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+esp_err_t web_ui_system_init(void);
 esp_err_t status_handler(httpd_req_t *req);
 esp_err_t ota_status_handler(httpd_req_t *req);
 esp_err_t ota_upload_handler(httpd_req_t *req);
@@ -26,6 +27,8 @@ esp_err_t root_get_handler(httpd_req_t *req);
 esp_err_t devices_config_handler(httpd_req_t *req);
 esp_err_t devices_apply_handler(httpd_req_t *req);
 esp_err_t devices_run_handler(httpd_req_t *req);
+esp_err_t devices_signal_reset_handler(httpd_req_t *req);
+esp_err_t devices_sequence_reset_handler(httpd_req_t *req);
 esp_err_t devices_profile_create_handler(httpd_req_t *req);
 esp_err_t devices_profile_delete_handler(httpd_req_t *req);
 esp_err_t devices_profile_rename_handler(httpd_req_t *req);

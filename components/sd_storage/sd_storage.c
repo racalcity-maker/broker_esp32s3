@@ -33,17 +33,24 @@ static void sd_storage_post_state(event_bus_type_t type)
     }
 }
 
-static void sd_lock(void)
+static bool sd_lock(void)
 {
     if (s_sd_mutex) {
-        xSemaphoreTake(s_sd_mutex, portMAX_DELAY);
+        if (xSemaphoreTake(s_sd_mutex, portMAX_DELAY) == pdTRUE) {
+            return true;
+        }
+        ESP_LOGE(TAG, "failed to lock sd mutex");
+        return false;
     }
+    return false;
 }
 
 static void sd_unlock(void)
 {
     if (s_sd_mutex) {
-        xSemaphoreGive(s_sd_mutex);
+        if (xSemaphoreGive(s_sd_mutex) != pdTRUE) {
+            ESP_LOGW(TAG, "failed to unlock sd mutex");
+        }
     }
 }
 
@@ -53,7 +60,11 @@ static esp_err_t ensure_mutex(void)
         return ESP_OK;
     }
     s_sd_mutex = xSemaphoreCreateMutex();
-    return s_sd_mutex ? ESP_OK : ESP_ERR_NO_MEM;
+    if (!s_sd_mutex) {
+        ESP_LOGE(TAG, "failed to create sd mutex");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 esp_err_t sd_storage_init(void)
@@ -65,7 +76,9 @@ esp_err_t sd_storage_mount(void)
 {
     ESP_RETURN_ON_ERROR(ensure_mutex(), TAG, "sd mutex init failed");
 
-    sd_lock();
+    if (!sd_lock()) {
+        return ESP_ERR_TIMEOUT;
+    }
     if (s_card) {
         sd_unlock();
         return ESP_OK;
@@ -120,7 +133,9 @@ bool sd_storage_available(void)
     if (ensure_mutex() != ESP_OK) {
         return false;
     }
-    sd_lock();
+    if (!sd_lock()) {
+        return false;
+    }
     present = (s_card != NULL);
     sd_unlock();
     return present;
@@ -130,7 +145,37 @@ esp_err_t sd_storage_info(uint64_t *kb_total, uint64_t *kb_free)
 {
     uint64_t total = 0;
     uint64_t free = 0;
-    esp_err_t err = esp_vfs_fat_info(SD_STORAGE_ROOT_PATH, &total, &free);
+    esp_err_t err = ensure_mutex();
+    if (err != ESP_OK) {
+        if (kb_total) {
+            *kb_total = 0;
+        }
+        if (kb_free) {
+            *kb_free = 0;
+        }
+        return err;
+    }
+    if (!sd_lock()) {
+        if (kb_total) {
+            *kb_total = 0;
+        }
+        if (kb_free) {
+            *kb_free = 0;
+        }
+        return ESP_ERR_TIMEOUT;
+    }
+    if (!s_card) {
+        sd_unlock();
+        if (kb_total) {
+            *kb_total = 0;
+        }
+        if (kb_free) {
+            *kb_free = 0;
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+    err = esp_vfs_fat_info(SD_STORAGE_ROOT_PATH, &total, &free);
+    sd_unlock();
     if (kb_total) {
         *kb_total = (err == ESP_OK) ? total : 0;
     }

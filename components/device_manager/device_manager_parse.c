@@ -153,6 +153,14 @@ static bool uid_template_from_json(dm_uid_template_t *tpl, const cJSON *obj)
     if (cJSON_IsString(fail_signal_payload) && fail_signal_payload->valuestring) {
         dm_str_copy(tpl->fail_signal_payload, sizeof(tpl->fail_signal_payload), fail_signal_payload->valuestring);
     }
+    const cJSON *success_scenario = cJSON_GetObjectItem(obj, "success_scenario");
+    if (cJSON_IsString(success_scenario) && success_scenario->valuestring) {
+        dm_str_copy(tpl->success_scenario, sizeof(tpl->success_scenario), success_scenario->valuestring);
+    }
+    const cJSON *fail_scenario = cJSON_GetObjectItem(obj, "fail_scenario");
+    if (cJSON_IsString(fail_scenario) && fail_scenario->valuestring) {
+        dm_str_copy(tpl->fail_scenario, sizeof(tpl->fail_scenario), fail_scenario->valuestring);
+    }
     return tpl->slot_count > 0;
 }
 
@@ -666,7 +674,7 @@ bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *roo
     }
     dm_profiles_ensure_active(cfg);
 
-    // Parse devices with topics/scenarios/template payloads.
+    // Parse devices with scenarios/template payloads.
     const cJSON *devices = cJSON_GetObjectItem(root, "devices");
     if (!devices || !cJSON_IsArray(devices)) {
         cfg->device_count = 0;
@@ -697,27 +705,6 @@ bool dm_populate_config_from_json(device_manager_config_t *cfg, const cJSON *roo
         }
         dm_str_copy(dev->display_name, sizeof(dev->display_name), display);
         feed_wdt();
-
-        const cJSON *topics = cJSON_GetObjectItem(dev_node, "topics");
-        uint8_t topic_count = 0;
-        if (cJSON_IsArray(topics)) {
-            const cJSON *topic_node = NULL;
-            cJSON_ArrayForEach(topic_node, topics) {
-                if (topic_count >= DEVICE_MANAGER_MAX_TOPICS_PER_DEVICE) {
-                    break;
-                }
-                if (!cJSON_IsObject(topic_node)) {
-                    continue;
-                }
-                device_topic_binding_t *binding = &dev->topics[topic_count++];
-                dm_str_copy(binding->name, sizeof(binding->name),
-                            cJSON_GetStringValue(cJSON_GetObjectItem(topic_node, "name")));
-                dm_str_copy(binding->topic, sizeof(binding->topic),
-                            cJSON_GetStringValue(cJSON_GetObjectItem(topic_node, "topic")));
-                feed_wdt();
-            }
-        }
-        dev->topic_count = topic_count;
 
         const cJSON *scenarios = cJSON_GetObjectItem(dev_node, "scenarios");
         uint8_t scenario_count = 0;

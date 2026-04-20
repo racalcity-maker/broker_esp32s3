@@ -1,10 +1,12 @@
 #include "unity.h"
 #include "mqtt_core.h"
+#include "mqtt_core_internal.h"
 #include "event_bus.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_heap_caps.h"
 #include <stdio.h>
 #include <inttypes.h>
 
@@ -55,9 +57,40 @@ static void flush_queue(void)
     }
 }
 
+static void clear_retain_table(void)
+{
+    if (!s_retain) {
+        return;
+    }
+    for (size_t i = 0; i < MQTT_RETAIN_MAX; ++i) {
+        if (s_retain[i].payload) {
+            heap_caps_free(s_retain[i].payload);
+            s_retain[i].payload = NULL;
+        }
+        s_retain[i].payload_len = 0;
+        s_retain[i].topic[0] = '\0';
+        s_retain[i].qos = 0;
+        s_retain[i].in_use = false;
+    }
+}
+
+static retain_entry_t *find_retain_entry(const char *topic)
+{
+    if (!s_retain || !topic) {
+        return NULL;
+    }
+    for (size_t i = 0; i < MQTT_RETAIN_MAX; ++i) {
+        if (s_retain[i].in_use && strcmp(s_retain[i].topic, topic) == 0) {
+            return &s_retain[i];
+        }
+    }
+    return NULL;
+}
+
 void setUp(void)
 {
     flush_queue();
+    clear_retain_table();
 }
 
 void tearDown(void)
@@ -203,6 +236,29 @@ static void test_mqtt_parallel_burst(void)
     drain_parallel_events(total_messages, typed_expected);
 }
 
+static void test_topic_matches_filter_wildcards(void)
+{
+    TEST_ASSERT_TRUE(topic_matches_filter("#", "alpha"));
+    TEST_ASSERT_TRUE(topic_matches_filter("alpha/#", "alpha"));
+    TEST_ASSERT_TRUE(topic_matches_filter("alpha/#", "alpha/beta"));
+    TEST_ASSERT_TRUE(topic_matches_filter("alpha/+/gamma", "alpha/beta/gamma"));
+    TEST_ASSERT_FALSE(topic_matches_filter("alpha/+/gamma", "alpha/beta/delta"));
+    TEST_ASSERT_FALSE(topic_matches_filter("alpha/+", "alpha"));
+    TEST_ASSERT_FALSE(topic_matches_filter("alpha/+", "alpha/beta/gamma"));
+}
+
+static void test_retain_empty_payload_clears_entry(void)
+{
+    retain_store("quest/retain", "value1", 0);
+    retain_entry_t *slot = find_retain_entry("quest/retain");
+    TEST_ASSERT_NOT_NULL(slot);
+    TEST_ASSERT_NOT_NULL(slot->payload);
+    TEST_ASSERT_EQUAL_STRING("value1", slot->payload);
+
+    retain_store("quest/retain", "", 0);
+    TEST_ASSERT_NULL(find_retain_entry("quest/retain"));
+}
+
 void register_mqtt_core_tests(void)
 {
     RUN_TEST(test_mqtt_topic_map);
@@ -210,4 +266,6 @@ void register_mqtt_core_tests(void)
     RUN_TEST(test_mqtt_inject_dispatch);
     RUN_TEST(test_mqtt_inject_stress);
     RUN_TEST(test_mqtt_parallel_burst);
+    RUN_TEST(test_topic_matches_filter_wildcards);
+    RUN_TEST(test_retain_empty_payload_clears_entry);
 }

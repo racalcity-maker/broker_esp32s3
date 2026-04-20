@@ -102,6 +102,98 @@ static cJSON *build_uid_monitor_json(void)
     return root;
 }
 
+static cJSON *build_sequence_monitor_json(void)
+{
+    const device_manager_config_t *cfg = device_manager_lock_config();
+    if (!cfg) {
+        device_manager_unlock_config();
+        return empty_json_array();
+    }
+    cJSON *root = cJSON_CreateArray();
+    if (!root) {
+        device_manager_unlock_config();
+        return empty_json_array();
+    }
+    uint8_t limit = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    for (uint8_t i = 0; i < cfg->device_count && i < limit; ++i) {
+        const device_descriptor_t *dev = &cfg->devices[i];
+        if (!dev->template_assigned || dev->template_config.type != DM_TEMPLATE_TYPE_SEQUENCE_LOCK) {
+            continue;
+        }
+        dm_sequence_runtime_snapshot_t snapshot;
+        if (dm_template_runtime_get_sequence_snapshot(dev->id, &snapshot) != ESP_OK) {
+            continue;
+        }
+        cJSON *obj = cJSON_CreateObject();
+        if (!obj) {
+            cJSON_Delete(root);
+            device_manager_unlock_config();
+            return empty_json_array();
+        }
+        cJSON_AddStringToObject(obj, "id", dev->id);
+        cJSON_AddStringToObject(obj, "name", dev->display_name[0] ? dev->display_name : dev->id);
+        cJSON_AddStringToObject(obj, "state", snapshot.state);
+        cJSON_AddBoolToObject(obj, "active", snapshot.active);
+        cJSON_AddNumberToObject(obj, "current_step_index", snapshot.current_step_index);
+        cJSON_AddNumberToObject(obj, "completed_steps", snapshot.current_step_index);
+        cJSON_AddNumberToObject(obj, "total_steps", snapshot.total_steps);
+        cJSON_AddNumberToObject(obj, "timeout_ms", snapshot.timeout_ms);
+        cJSON_AddNumberToObject(obj, "time_left_ms", snapshot.time_left_ms);
+        cJSON_AddBoolToObject(obj, "reset_on_error", snapshot.reset_on_error);
+        cJSON_AddStringToObject(obj, "expected_topic", snapshot.expected_topic);
+        cJSON_AddStringToObject(obj, "expected_payload", snapshot.expected_payload);
+        cJSON_AddBoolToObject(obj, "payload_required", snapshot.payload_required);
+        cJSON_AddItemToArray(root, obj);
+    }
+    device_manager_unlock_config();
+    return root;
+}
+
+static cJSON *build_signal_monitor_json(void)
+{
+    const device_manager_config_t *cfg = device_manager_lock_config();
+    if (!cfg) {
+        device_manager_unlock_config();
+        return empty_json_array();
+    }
+    cJSON *root = cJSON_CreateArray();
+    if (!root) {
+        device_manager_unlock_config();
+        return empty_json_array();
+    }
+    uint8_t limit = cfg->device_capacity ? cfg->device_capacity : DEVICE_MANAGER_MAX_DEVICES;
+    for (uint8_t i = 0; i < cfg->device_count && i < limit; ++i) {
+        const device_descriptor_t *dev = &cfg->devices[i];
+        if (!dev->template_assigned || dev->template_config.type != DM_TEMPLATE_TYPE_SIGNAL_HOLD) {
+            continue;
+        }
+        dm_signal_runtime_snapshot_t snapshot;
+        if (dm_template_runtime_get_signal_snapshot(dev->id, &snapshot) != ESP_OK) {
+            continue;
+        }
+        cJSON *obj = cJSON_CreateObject();
+        if (!obj) {
+            cJSON_Delete(root);
+            device_manager_unlock_config();
+            return empty_json_array();
+        }
+        cJSON_AddStringToObject(obj, "id", dev->id);
+        cJSON_AddStringToObject(obj, "name", dev->display_name[0] ? dev->display_name : dev->id);
+        cJSON_AddStringToObject(obj, "state", snapshot.state);
+        cJSON_AddBoolToObject(obj, "active", snapshot.active);
+        cJSON_AddBoolToObject(obj, "completed", snapshot.completed);
+        cJSON_AddNumberToObject(obj, "progress_ms", snapshot.progress_ms);
+        cJSON_AddNumberToObject(obj, "required_hold_ms", snapshot.required_hold_ms);
+        cJSON_AddNumberToObject(obj, "heartbeat_timeout_ms", snapshot.heartbeat_timeout_ms);
+        cJSON_AddNumberToObject(obj, "time_left_ms", snapshot.time_left_ms);
+        cJSON_AddStringToObject(obj, "heartbeat_topic", snapshot.heartbeat_topic);
+        cJSON_AddStringToObject(obj, "reset_topic", snapshot.reset_topic);
+        cJSON_AddItemToArray(root, obj);
+    }
+    device_manager_unlock_config();
+    return root;
+}
+
 static cJSON *build_mqtt_users_json(const app_mqtt_config_t *mqtt_cfg)
 {
     cJSON *root = cJSON_CreateArray();
@@ -180,12 +272,20 @@ esp_err_t status_handler(httpd_req_t *req)
     cJSON *ota_obj = cJSON_AddObjectToObject(root, "ota");
     cJSON *services = cJSON_AddObjectToObject(root, "services");
     cJSON *uid_monitor = build_uid_monitor_json();
+    cJSON *signal_monitor = build_signal_monitor_json();
+    cJSON *sequence_monitor = build_sequence_monitor_json();
     cJSON *mqtt_users = build_mqtt_users_json(&cfg->mqtt);
 
     if (!wifi || !mqtt || !audio || !web || !web_operator || !sd || !diag || !mem ||
-        !dram || !psram || !clients || !ota_obj || !services || !uid_monitor || !mqtt_users) {
+        !dram || !psram || !clients || !ota_obj || !services || !uid_monitor || !signal_monitor || !sequence_monitor || !mqtt_users) {
         if (uid_monitor) {
             cJSON_Delete(uid_monitor);
+        }
+        if (signal_monitor) {
+            cJSON_Delete(signal_monitor);
+        }
+        if (sequence_monitor) {
+            cJSON_Delete(sequence_monitor);
         }
         if (mqtt_users) {
             cJSON_Delete(mqtt_users);
@@ -252,6 +352,8 @@ esp_err_t status_handler(httpd_req_t *req)
     cJSON *svc_web = cJSON_AddObjectToObject(services, "web_ui");
     if (!svc_network || !svc_mqtt || !svc_audio || !svc_web) {
         cJSON_Delete(uid_monitor);
+        cJSON_Delete(signal_monitor);
+        cJSON_Delete(sequence_monitor);
         cJSON_Delete(root);
         return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem"));
     }
@@ -276,6 +378,8 @@ esp_err_t status_handler(httpd_req_t *req)
     cJSON_AddBoolToObject(svc_web, "start_ok", web_service_status.start_ok);
 
     cJSON_AddItemToObject(root, "uid_monitor", uid_monitor);
+    cJSON_AddItemToObject(root, "signal_monitor", signal_monitor);
+    cJSON_AddItemToObject(root, "sequence_monitor", sequence_monitor);
 
     return WEB_HTTP_CHECK(web_ui_send_json(req, root));
 }

@@ -34,6 +34,8 @@ typedef struct {
 
 static ota_manager_state_t s_ota = {0};
 
+static void ota_confirm_task(void *arg);
+
 static bool ota_rollback_enabled(void)
 {
 #if defined(CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) && defined(CONFIG_APP_ROLLBACK_ENABLE)
@@ -123,6 +125,20 @@ static void ota_confirm_task_done(void)
         s_ota.confirm_task_started = false;
         ota_unlock();
     }
+}
+
+static esp_err_t ota_start_confirm_task_locked(void)
+{
+    if (s_ota.confirm_task_started) {
+        return ESP_OK;
+    }
+    s_ota.confirm_task_started = true;
+    if (xTaskCreate(ota_confirm_task, "ota_confirm", 4096, NULL, 4, NULL) != pdPASS) {
+        s_ota.confirm_task_started = false;
+        set_last_error_locked("confirm task create failed");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
 static void ota_confirm_task(void *arg)
@@ -215,16 +231,11 @@ esp_err_t ota_manager_notify_boot(void)
 
     if (pending_verify) {
         if (ota_lock(portMAX_DELAY)) {
-            if (!s_ota.confirm_task_started) {
-                s_ota.confirm_task_started = true;
-                if (xTaskCreate(ota_confirm_task, "ota_confirm", 4096, NULL, 4, NULL) != pdPASS) {
-                    s_ota.confirm_task_started = false;
-                    set_last_error_locked("confirm task create failed");
-                    ota_unlock();
-                    return ESP_ERR_NO_MEM;
-                }
-            }
+            esp_err_t start_err = ota_start_confirm_task_locked();
             ota_unlock();
+            if (start_err != ESP_OK) {
+                return start_err;
+            }
         }
     }
 
@@ -236,11 +247,18 @@ void ota_manager_notify_system_ready(void)
     if (!s_ota.initialized) {
         return;
     }
+    esp_err_t start_err = ESP_OK;
     if (ota_lock(portMAX_DELAY)) {
         s_ota.system_ready = true;
+        if (s_ota.pending_verify) {
+            start_err = ota_start_confirm_task_locked();
+        }
         ota_unlock();
     }
     ESP_LOGI(TAG, "system marked ready for OTA confirm");
+    if (start_err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to schedule OTA confirm after system ready: %s", esp_err_to_name(start_err));
+    }
 }
 
 void ota_manager_get_status(ota_manager_status_t *out)

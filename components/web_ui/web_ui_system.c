@@ -34,6 +34,19 @@ static esp_err_t web_http_check(esp_err_t err, const char *context)
 
 #define WEB_HTTP_CHECK(call) web_http_check((call), __func__)
 
+esp_err_t web_ui_system_init(void)
+{
+    if (s_scan_mutex) {
+        return ESP_OK;
+    }
+    s_scan_mutex = xSemaphoreCreateMutex();
+    if (!s_scan_mutex) {
+        ESP_LOGE(TAG, "failed to create wifi scan mutex");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
 esp_err_t ping_handler(httpd_req_t *req)
 {
     return web_ui_send_ok(req, "text/plain", "pong");
@@ -42,7 +55,7 @@ esp_err_t ping_handler(httpd_req_t *req)
 esp_err_t wifi_scan_handler(httpd_req_t *req)
 {
     if (!s_scan_mutex) {
-        s_scan_mutex = xSemaphoreCreateMutex();
+        return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan unavailable"));
     }
     if (!xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(5000))) {
         return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan busy"));
@@ -143,7 +156,11 @@ esp_err_t mqtt_config_handler(httpd_req_t *req)
     if (keep[0]) {
         cfg.mqtt.keepalive_seconds = atoi(keep);
     }
-    ESP_ERROR_CHECK(config_store_set(&cfg));
+    esp_err_t err = config_store_set(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "config_store_set(mqtt) failed: %s", esp_err_to_name(err));
+        return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "failed to save mqtt"));
+    }
     return web_ui_send_ok(req, "text/plain", "mqtt saved");
 }
 
@@ -262,7 +279,12 @@ esp_err_t publish_handler(httpd_req_t *req)
     event_bus_message_t msg = {.type = EVENT_WEB_COMMAND};
     strncpy(msg.topic, topic, sizeof(msg.topic) - 1);
     strncpy(msg.payload, payload, sizeof(msg.payload) - 1);
-    event_bus_post(&msg, pdMS_TO_TICKS(50));
+    esp_err_t err = event_bus_post(&msg, pdMS_TO_TICKS(50));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "publish event dispatch failed: %s", esp_err_to_name(err));
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        return WEB_HTTP_CHECK(httpd_resp_send(req, "event bus unavailable", HTTPD_RESP_USE_STRLEN));
+    }
     return web_ui_send_ok(req, "text/plain", "sent");
 }
 

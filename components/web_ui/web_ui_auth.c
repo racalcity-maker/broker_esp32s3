@@ -295,16 +295,22 @@ static esp_err_t auth_login_reject(httpd_req_t *req, const char *message)
     return WEB_HTTP_CHECK(web_ui_send_json(req, root));
 }
 
-void web_sessions_init(void)
+esp_err_t web_sessions_init(void)
 {
     if (!s_session_mutex) {
         s_session_mutex = xSemaphoreCreateMutex();
     }
-    if (s_session_mutex) {
-        xSemaphoreTake(s_session_mutex, portMAX_DELAY);
+    if (!s_session_mutex) {
+        ESP_LOGE(TAG, "failed to create session mutex");
+        return ESP_ERR_NO_MEM;
+    }
+    if (xSemaphoreTake(s_session_mutex, portMAX_DELAY) == pdTRUE) {
         memset(s_sessions, 0, sizeof(s_sessions));
         xSemaphoreGive(s_session_mutex);
+        return ESP_OK;
     }
+    ESP_LOGE(TAG, "failed to lock session mutex during init");
+    return ESP_ERR_TIMEOUT;
 }
 
 void web_sessions_clear(void)
@@ -591,8 +597,18 @@ void web_auth_start_reset_monitor(void)
         .pull_down_en = false,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    gpio_config(&io_conf);
-    xTaskCreate(web_auth_reset_task, "web_auth_reset", 2048, NULL, 5, &s_reset_task);
+    esp_err_t err = gpio_config(&io_conf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "web auth reset gpio config failed: %s", esp_err_to_name(err));
+        return;
+    }
+    BaseType_t ok = xTaskCreate(web_auth_reset_task, "web_auth_reset", 2048, NULL, 5, &s_reset_task);
+    if (ok != pdPASS) {
+        s_reset_task = NULL;
+        ESP_LOGE(TAG, "failed to create web auth reset monitor task");
+        return;
+    }
+    ESP_LOGI(TAG, "web auth reset monitor task started");
 }
 #else
 void web_auth_start_reset_monitor(void)

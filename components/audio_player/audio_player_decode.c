@@ -43,20 +43,19 @@ static void post_audio_finished(const char *path)
 
 static size_t mp3_i2s_write_cb(const uint8_t *data, size_t len, void *user)
 {
-    if (audio_player_stop_requested()) {
+    const audio_reader_ctx_t *ctx = (const audio_reader_ctx_t *)user;
+    if (audio_player_reader_stop_requested(ctx)) {
         return 0;
     }
-    audio_player_wait_while_paused();
+    audio_player_reader_wait_while_paused(ctx);
 
-    i2s_chan_handle_t chan = (i2s_chan_handle_t)user;
+    i2s_chan_handle_t chan = audio_player_output_channel();
     size_t written = 0;
     if (!chan) {
         return 0;
     }
 
-    int vol = audio_player_runtime_volume();
-    if (vol < 0) vol = 0;
-    if (vol > 100) vol = 100;
+    int vol = audio_player_reader_volume(ctx);
 
     const bool unity = (vol == 100);
     const int16_t *in = (const int16_t *)data;
@@ -89,7 +88,9 @@ static size_t mp3_i2s_write_cb(const uint8_t *data, size_t len, void *user)
 
 static void mp3_progress_cb(size_t bytes_read, size_t total_bytes, uint32_t elapsed_ms, uint32_t est_total_ms, void *user)
 {
-    int kbps = user ? *((int *)user) : 0;
+    const audio_reader_ctx_t *ctx = (const audio_reader_ctx_t *)user;
+    int *bitrate_ptr = audio_player_reader_bitrate_ptr(ctx);
+    int kbps = bitrate_ptr ? *bitrate_ptr : 0;
     audio_player_status_update_progress(bytes_read, total_bytes, elapsed_ms, est_total_ms);
     if (kbps > 0) {
         audio_player_status_update_bitrate(kbps);
@@ -193,7 +194,11 @@ static size_t convert_pcm_to_output(const int16_t *in, size_t frames_in, const a
     return out_frames;
 }
 
-static bool decode_wav_to_output(FILE *f, const audio_info_t *info, uint32_t data_size, size_t initial_bytes_done)
+static bool decode_wav_to_output(FILE *f,
+                                 const audio_reader_ctx_t *ctx,
+                                 const audio_info_t *info,
+                                 uint32_t data_size,
+                                 size_t initial_bytes_done)
 {
     const size_t in_buf_frames = 512;
     int16_t *in_buf = heap_caps_malloc(in_buf_frames * info->channels * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -210,15 +215,12 @@ static bool decode_wav_to_output(FILE *f, const audio_info_t *info, uint32_t dat
     size_t bytes_done = initial_bytes_done;
     const uint32_t byte_rate = info->sample_rate * info->channels * (info->bits_per_sample / 8);
     while ((bytes_read = fread(in_buf, 1, in_buf_frames * info->channels * sizeof(int16_t), f)) > 0) {
-        if (audio_player_stop_requested()) {
+        if (audio_player_reader_stop_requested(ctx)) {
             break;
         }
-        audio_player_wait_while_paused();
+        audio_player_reader_wait_while_paused(ctx);
 
-        int vol = audio_player_runtime_volume();
-        if (vol < 0) vol = 0;
-        if (vol > 100) vol = 100;
-        float gain = vol / 100.0f;
+        float gain = audio_player_reader_volume(ctx) / 100.0f;
 
         size_t frames = bytes_read / (info->channels * sizeof(int16_t));
         size_t out_frames = convert_pcm_to_output(in_buf, frames, info, out_buf, gain);
@@ -251,19 +253,20 @@ static bool decode_wav_to_output(FILE *f, const audio_info_t *info, uint32_t dat
 
 void audio_player_reader_task(void *param)
 {
-    audio_cmd_t cmd = *(audio_cmd_t *)param;
-    free(param);
-    audio_player_reader_begin();
+    audio_reader_ctx_t *ctx = (audio_reader_ctx_t *)param;
+    audio_cmd_t cmd = ctx ? ctx->cmd : (audio_cmd_t){0};
+    audio_player_runtime_reader_started(ctx);
 
     FILE *f = fopen(cmd.path, "rb");
     if (!f) {
         ESP_LOGE(TAG, "cannot open %s", cmd.path);
         audio_player_status_set_message("Cannot open file");
         error_monitor_report_audio_fault();
-        if (!audio_player_stop_requested()) {
+        if (!audio_player_reader_stop_requested(ctx)) {
             post_audio_finished(cmd.path);
         }
-        audio_player_reader_finished();
+        audio_player_runtime_reader_finished(ctx);
+        audio_player_runtime_destroy_reader_ctx(ctx);
         vTaskDelete(NULL);
         return;
     }
@@ -299,7 +302,7 @@ void audio_player_reader_task(void *param)
     info.fmt = fmt;
 
     if (cmd.seek_ratio < 0.0f) {
-        audio_player_status_set_play(cmd.path, fmt, audio_player_runtime_volume());
+        audio_player_status_set_play(cmd.path, fmt, audio_player_reader_volume(ctx));
     } else {
         audio_player_status_mark_seek_play(cmd.path, fmt);
     }
@@ -322,7 +325,7 @@ void audio_player_reader_task(void *param)
                 uint32_t dur_ms = (uint32_t)((data_size * 1000ULL) / byte_rate);
                 audio_player_status_update_progress(skip_bytes, data_size, est_ms, dur_ms);
             }
-            decode_wav_to_output(f, &info, data_size, skip_bytes);
+            decode_wav_to_output(f, ctx, &info, data_size, skip_bytes);
         } else {
             ESP_LOGE(TAG, "bad wav header");
             audio_player_status_set_message("Bad WAV header");
@@ -331,14 +334,16 @@ void audio_player_reader_task(void *param)
     } else if (fmt == AUDIO_FMT_MP3) {
         fclose(f);
         f = NULL;
-        int *bitrate_kbps = audio_player_runtime_bitrate_ptr();
-        *bitrate_kbps = 0;
+        int *bitrate_kbps = audio_player_reader_bitrate_ptr(ctx);
+        if (bitrate_kbps) {
+            *bitrate_kbps = 0;
+        }
         helix_mp3_decode_file(cmd.path,
-                              audio_player_runtime_volume(),
+                              audio_player_reader_volume(ctx),
                               mp3_i2s_write_cb,
-                              audio_player_output_channel(),
+                              ctx,
                               mp3_progress_cb,
-                              bitrate_kbps,
+                              ctx,
                               cmd.seek_ratio);
     } else if (fmt == AUDIO_FMT_OGG) {
         ESP_LOGW(TAG, "OGG decode not implemented yet");
@@ -353,13 +358,13 @@ void audio_player_reader_task(void *param)
     if (f) {
         fclose(f);
     }
-    if (!audio_player_stop_requested() && audio_player_output_channel()) {
+    if (!audio_player_reader_stop_requested(ctx) && audio_player_output_channel()) {
         audio_player_output_disable();
     }
-    audio_player_status_set_playing(false);
-    if (!audio_player_stop_requested()) {
+    if (!audio_player_reader_stop_requested(ctx)) {
         post_audio_finished(cmd.path);
     }
-    audio_player_reader_finished();
+    audio_player_runtime_reader_finished(ctx);
+    audio_player_runtime_destroy_reader_ctx(ctx);
     vTaskDelete(NULL);
 }

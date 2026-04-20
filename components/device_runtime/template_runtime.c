@@ -80,6 +80,9 @@ typedef struct interval_runtime_entry {
 typedef struct sequence_runtime_entry {
     char device_id[DEVICE_MANAGER_ID_MAX_LEN];
     dm_sequence_runtime_t runtime;
+    esp_timer_handle_t timeout_timer;
+    dm_sequence_event_type_t last_event;
+    bool last_timeout;
     struct sequence_runtime_entry *next;
 } sequence_runtime_entry_t;
 
@@ -108,12 +111,18 @@ static void apply_signal_mqtt_action(signal_runtime_entry_t *entry, const dm_sig
 static void signal_timeout_timer_cb(void *arg);
 static void restart_signal_timeout_timer(signal_runtime_entry_t *entry);
 static void stop_signal_timeout_timer(signal_runtime_entry_t *entry);
+static void sequence_timeout_timer_cb(void *arg);
+static void restart_sequence_timeout_timer(sequence_runtime_entry_t *entry);
+static void stop_sequence_timeout_timer(sequence_runtime_entry_t *entry);
 static void reset_signal_entry(signal_runtime_entry_t *entry, const char *topic);
 static void uid_audio_resume_clear(void);
 static void uid_audio_resume_timeout_cb(void *arg);
 static void uid_audio_resume_arm(const char *fail_track, const char *bg_track);
 static void uid_audio_resume_handle_finished(const char *path);
 static esp_err_t request_scenario_trigger(const char *device_id, const char *scenario_id);
+static const char *sequence_state_str(const sequence_runtime_entry_t *entry);
+static const char *signal_state_str(const signal_runtime_entry_t *entry);
+static void reset_sequence_entry(sequence_runtime_entry_t *entry);
 
 static esp_err_t request_scenario_trigger(const char *device_id, const char *scenario_id)
 {
@@ -380,6 +389,23 @@ static void reset_signal_entry(signal_runtime_entry_t *entry, const char *topic)
     }
 }
 
+static const char *signal_state_str(const signal_runtime_entry_t *entry)
+{
+    if (!entry) {
+        return "idle";
+    }
+    if (entry->runtime.state.finished) {
+        return "completed";
+    }
+    if (entry->runtime.state.active || entry->hold_active) {
+        return "active";
+    }
+    if (entry->runtime.state.accumulated_ms > 0 || entry->hold_started || entry->hold_paused) {
+        return "paused";
+    }
+    return "idle";
+}
+
 static void free_mqtt_entries(void)
 {
     mqtt_runtime_entry_t *entry = s_mqtt_entries;
@@ -433,6 +459,10 @@ static void free_sequence_entries(void)
     sequence_runtime_entry_t *entry = s_sequence_entries;
     while (entry) {
         sequence_runtime_entry_t *next = entry->next;
+        if (entry->timeout_timer) {
+            esp_timer_stop(entry->timeout_timer);
+            esp_timer_delete(entry->timeout_timer);
+        }
         heap_caps_free(entry);
         entry = next;
     }
@@ -686,6 +716,22 @@ static esp_err_t register_sequence_runtime(const dm_sequence_template_t *tpl, co
     }
     dm_str_copy(entry->device_id, sizeof(entry->device_id), device_id);
     dm_sequence_runtime_init(&entry->runtime, tpl);
+    entry->timeout_timer = NULL;
+    entry->last_event = DM_SEQUENCE_EVENT_NONE;
+    entry->last_timeout = false;
+    const esp_timer_create_args_t args = {
+        .callback = sequence_timeout_timer_cb,
+        .arg = entry,
+        .name = "dm_sequence_timeout",
+    };
+    esp_err_t timer_err = esp_timer_create(&args, &entry->timeout_timer);
+    if (timer_err != ESP_OK) {
+        ESP_LOGE(TAG, "sequence timer create failed for %s: %s",
+                 device_id,
+                 esp_err_to_name(timer_err));
+        heap_caps_free(entry);
+        return timer_err;
+    }
     entry->next = s_sequence_entries;
     s_sequence_entries = entry;
     ESP_LOGI(TAG, "registered sequence runtime for %s (%u steps)",
@@ -892,6 +938,13 @@ static void apply_uid_action(uid_runtime_entry_t *entry, const dm_uid_action_t *
         }
         audio_player_play(action->audio_track);
     }
+    if (entry) {
+        if (action->event == DM_UID_EVENT_SUCCESS) {
+            trigger_device_scenario(entry->device_id, entry->runtime.config.success_scenario);
+        } else if (action->event == DM_UID_EVENT_INVALID) {
+            trigger_device_scenario(entry->device_id, entry->runtime.config.fail_scenario);
+        }
+    }
 }
 
 static bool uid_action_is_duplicate(uid_runtime_entry_t *entry, dm_uid_event_type_t ev)
@@ -1077,6 +1130,81 @@ static void apply_sequence_fail(sequence_runtime_entry_t *entry)
     trigger_device_scenario(entry->device_id, cfg->fail_scenario);
 }
 
+static void reset_sequence_entry(sequence_runtime_entry_t *entry)
+{
+    if (!entry) {
+        return;
+    }
+    stop_sequence_timeout_timer(entry);
+    dm_sequence_runtime_reset(&entry->runtime);
+    entry->last_event = DM_SEQUENCE_EVENT_NONE;
+    entry->last_timeout = false;
+}
+
+static uint64_t sequence_timeout_interval_us(const sequence_runtime_entry_t *entry)
+{
+    if (!entry) {
+        return 0;
+    }
+    return entry->runtime.config.timeout_ms ? ((uint64_t)entry->runtime.config.timeout_ms * 1000ULL) : 0;
+}
+
+static void restart_sequence_timeout_timer(sequence_runtime_entry_t *entry)
+{
+    if (!entry || !entry->timeout_timer) {
+        return;
+    }
+    uint64_t timeout_us = sequence_timeout_interval_us(entry);
+    if (timeout_us == 0) {
+        return;
+    }
+    esp_timer_stop(entry->timeout_timer);
+    esp_timer_start_once(entry->timeout_timer, timeout_us);
+}
+
+static void stop_sequence_timeout_timer(sequence_runtime_entry_t *entry)
+{
+    if (!entry || !entry->timeout_timer) {
+        return;
+    }
+    esp_timer_stop(entry->timeout_timer);
+}
+
+static void sequence_timeout_timer_cb(void *arg)
+{
+    sequence_runtime_entry_t *entry = (sequence_runtime_entry_t *)arg;
+    if (!entry) {
+        return;
+    }
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    dm_sequence_action_t action = dm_sequence_runtime_handle_timeout(&entry->runtime, now_ms);
+    if (action.type != DM_SEQUENCE_EVENT_FAILED || !action.timeout) {
+        return;
+    }
+    entry->last_event = action.type;
+    entry->last_timeout = true;
+    uint32_t timeout_ms = entry->runtime.config.timeout_ms;
+    ESP_LOGW(TAG, "[Sequence] dev=%s timeout>%ums", entry->device_id, (unsigned)timeout_ms);
+    apply_sequence_fail(entry);
+}
+
+static const char *sequence_state_str(const sequence_runtime_entry_t *entry)
+{
+    if (!entry) {
+        return "idle";
+    }
+    if (entry->runtime.current_index > 0) {
+        return "active";
+    }
+    if (entry->last_event == DM_SEQUENCE_EVENT_COMPLETED) {
+        return "completed";
+    }
+    if (entry->last_event == DM_SEQUENCE_EVENT_FAILED) {
+        return entry->last_timeout ? "timeout" : "failed";
+    }
+    return "idle";
+}
+
 static bool handle_sequence_message(const char *topic, const char *payload)
 {
     if (!topic || !topic[0]) {
@@ -1094,30 +1222,39 @@ static bool handle_sequence_message(const char *topic, const char *payload)
         const char *step_topic = action.step && action.step->topic[0] ? action.step->topic : topic;
         switch (action.type) {
         case DM_SEQUENCE_EVENT_STEP_OK:
+            entry->last_event = action.type;
+            entry->last_timeout = false;
             ESP_LOGI(TAG, "[Sequence] dev=%s step ok topic=%s payload='%s'",
                      entry->device_id,
                      step_topic,
                      payload ? payload : "");
+            restart_sequence_timeout_timer(entry);
             if (action.step) {
                 apply_sequence_step_hint(action.step);
             }
             break;
         case DM_SEQUENCE_EVENT_COMPLETED:
+            entry->last_event = action.type;
+            entry->last_timeout = false;
             ESP_LOGI(TAG, "[Sequence] dev=%s completed topic=%s payload='%s'",
                      entry->device_id,
                      step_topic,
                      payload ? payload : "");
+            stop_sequence_timeout_timer(entry);
             if (action.step) {
                 apply_sequence_step_hint(action.step);
             }
             apply_sequence_success(entry);
             break;
         case DM_SEQUENCE_EVENT_FAILED:
+            entry->last_event = action.type;
+            entry->last_timeout = action.timeout;
             ESP_LOGW(TAG, "[Sequence] dev=%s failed topic=%s payload='%s'%s",
                      entry->device_id,
                      step_topic,
                      payload ? payload : "",
                      action.timeout ? " (timeout)" : "");
+            stop_sequence_timeout_timer(entry);
             apply_sequence_fail(entry);
             break;
         case DM_SEQUENCE_EVENT_NONE:
@@ -1130,6 +1267,108 @@ static bool handle_sequence_message(const char *topic, const char *payload)
         }
     }
     return handled;
+}
+
+esp_err_t dm_template_runtime_get_sequence_snapshot(const char *device_id, dm_sequence_runtime_snapshot_t *out)
+{
+    if (!device_id || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    for (sequence_runtime_entry_t *entry = s_sequence_entries; entry; entry = entry->next) {
+        if (strcmp(entry->device_id, device_id) != 0) {
+            continue;
+        }
+        const dm_sequence_template_t *cfg = &entry->runtime.config;
+        dm_str_copy(out->device_id, sizeof(out->device_id), entry->device_id);
+        out->active = entry->runtime.current_index > 0;
+        out->current_step_index = entry->runtime.current_index;
+        out->total_steps = cfg->step_count;
+        out->timeout_ms = cfg->timeout_ms;
+        out->reset_on_error = cfg->reset_on_error;
+        dm_str_copy(out->state, sizeof(out->state), sequence_state_str(entry));
+        if (out->active && entry->runtime.current_index < cfg->step_count) {
+            const dm_sequence_step_t *step = &cfg->steps[entry->runtime.current_index];
+            dm_str_copy(out->expected_topic, sizeof(out->expected_topic), step->topic);
+            dm_str_copy(out->expected_payload, sizeof(out->expected_payload), step->payload);
+            out->payload_required = step->payload_required;
+            if (cfg->timeout_ms > 0 && entry->runtime.last_step_ms > 0) {
+                uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+                uint64_t deadline_ms = entry->runtime.last_step_ms + cfg->timeout_ms;
+                if (deadline_ms > now_ms) {
+                    uint64_t left_ms = deadline_ms - now_ms;
+                    out->time_left_ms = (left_ms > UINT32_MAX) ? UINT32_MAX : (uint32_t)left_ms;
+                }
+            }
+        }
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t dm_template_runtime_get_signal_snapshot(const char *device_id, dm_signal_runtime_snapshot_t *out)
+{
+    if (!device_id || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+    for (signal_runtime_entry_t *entry = s_signal_entries; entry; entry = entry->next) {
+        if (strcmp(entry->device_id, device_id) != 0) {
+            continue;
+        }
+        const dm_signal_hold_template_t *cfg = &entry->runtime.config;
+        dm_str_copy(out->device_id, sizeof(out->device_id), entry->device_id);
+        out->active = entry->runtime.state.active;
+        out->completed = entry->runtime.state.finished;
+        out->progress_ms = entry->runtime.state.accumulated_ms;
+        out->required_hold_ms = cfg->required_hold_ms;
+        out->heartbeat_timeout_ms = cfg->heartbeat_timeout_ms ? cfg->heartbeat_timeout_ms : 1000;
+        dm_str_copy(out->state, sizeof(out->state), signal_state_str(entry));
+        dm_str_copy(out->heartbeat_topic, sizeof(out->heartbeat_topic), cfg->heartbeat_topic);
+        dm_str_copy(out->reset_topic, sizeof(out->reset_topic), cfg->reset_topic);
+        if (entry->runtime.state.active && entry->runtime.state.last_tick_ms > 0 && out->heartbeat_timeout_ms > 0) {
+            uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000);
+            uint64_t deadline_ms = entry->runtime.state.last_tick_ms + out->heartbeat_timeout_ms;
+            if (deadline_ms > now_ms) {
+                uint64_t left_ms = deadline_ms - now_ms;
+                out->time_left_ms = (left_ms > UINT32_MAX) ? UINT32_MAX : (uint32_t)left_ms;
+            }
+        }
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t dm_template_runtime_reset_signal(const char *device_id)
+{
+    if (!device_id || !device_id[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (signal_runtime_entry_t *entry = s_signal_entries; entry; entry = entry->next) {
+        if (strcmp(entry->device_id, device_id) != 0) {
+            continue;
+        }
+        reset_signal_entry(entry, "manual");
+        ESP_LOGI(TAG, "[Signal] dev=%s reset by request", entry->device_id);
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t dm_template_runtime_reset_sequence(const char *device_id)
+{
+    if (!device_id || !device_id[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (sequence_runtime_entry_t *entry = s_sequence_entries; entry; entry = entry->next) {
+        if (strcmp(entry->device_id, device_id) != 0) {
+            continue;
+        }
+        reset_sequence_entry(entry);
+        ESP_LOGI(TAG, "[Sequence] dev=%s reset by request", entry->device_id);
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
 }
 
 static bool handle_signal_message(const char *topic, const char *payload)

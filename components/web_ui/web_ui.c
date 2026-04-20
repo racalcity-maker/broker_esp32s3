@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_http_server.h"
@@ -16,12 +17,30 @@
 
 static const char *TAG = "web_ui";
 static httpd_handle_t s_server = NULL;
+static SemaphoreHandle_t s_httpd_restart_lock = NULL;
 static bool s_httpd_restart_pending = false;
 static char s_httpd_restart_reason[64];
 static void web_ui_schedule_httpd_restart(const char *reason);
 static void web_ui_httpd_restart_task(void *param);
 static esp_err_t start_httpd(void);
+static esp_err_t stop_httpd(void);
+static esp_err_t register_httpd_routes(void);
+static esp_err_t web_ui_restart_state_init(void);
+static bool web_ui_try_begin_httpd_restart(const char *reason);
+static void web_ui_cancel_httpd_restart(void);
+static void web_ui_finish_httpd_restart(void);
 void web_ui_report_httpd_error(esp_err_t err, const char *context);
+
+typedef struct {
+    const char *uri;
+    httpd_method_t method;
+    bool guarded;
+    web_user_role_t min_role;
+    bool redirect_on_fail;
+    esp_err_t (*fn)(httpd_req_t *req);
+} web_route_desc_t;
+
+#define WEB_ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 static esp_err_t web_http_check(esp_err_t err, const char *context)
 {
@@ -36,6 +55,60 @@ static esp_err_t web_http_check(esp_err_t err, const char *context)
 
 static esp_err_t register_guarded_route(const char *uri, httpd_method_t method, const web_route_t *route);
 static esp_err_t register_public_route(const char *uri, httpd_method_t method, esp_err_t (*handler)(httpd_req_t *));
+
+static esp_err_t web_ui_restart_state_init(void)
+{
+    if (s_httpd_restart_lock) {
+        return ESP_OK;
+    }
+    s_httpd_restart_lock = xSemaphoreCreateMutex();
+    if (!s_httpd_restart_lock) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static bool web_ui_try_begin_httpd_restart(const char *reason)
+{
+    if (!s_httpd_restart_lock) {
+        return false;
+    }
+    if (xSemaphoreTake(s_httpd_restart_lock, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    if (s_httpd_restart_pending) {
+        xSemaphoreGive(s_httpd_restart_lock);
+        return false;
+    }
+    s_httpd_restart_pending = true;
+    if (reason && reason[0]) {
+        strncpy(s_httpd_restart_reason, reason, sizeof(s_httpd_restart_reason) - 1);
+        s_httpd_restart_reason[sizeof(s_httpd_restart_reason) - 1] = '\0';
+    } else {
+        strncpy(s_httpd_restart_reason, "unknown", sizeof(s_httpd_restart_reason) - 1);
+        s_httpd_restart_reason[sizeof(s_httpd_restart_reason) - 1] = '\0';
+    }
+    xSemaphoreGive(s_httpd_restart_lock);
+    return true;
+}
+
+static void web_ui_cancel_httpd_restart(void)
+{
+    if (!s_httpd_restart_lock) {
+        return;
+    }
+    if (xSemaphoreTake(s_httpd_restart_lock, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+    s_httpd_restart_pending = false;
+    s_httpd_restart_reason[0] = '\0';
+    xSemaphoreGive(s_httpd_restart_lock);
+}
+
+static void web_ui_finish_httpd_restart(void)
+{
+    web_ui_cancel_httpd_restart();
+}
 
 static esp_err_t register_guarded_route(const char *uri, httpd_method_t method, const web_route_t *route)
 {
@@ -62,6 +135,86 @@ static esp_err_t register_public_route(const char *uri, httpd_method_t method, e
         .handler = handler,
     };
     return WEB_HTTP_CHECK_CTX(httpd_register_uri_handler(s_server, &desc), uri);
+}
+
+static esp_err_t stop_httpd(void)
+{
+    if (!s_server) {
+        return ESP_OK;
+    }
+
+    httpd_handle_t server = s_server;
+    esp_err_t err = httpd_stop(server);
+    if (err == ESP_OK) {
+        s_server = NULL;
+    } else {
+        ESP_LOGE(TAG, "httpd stop failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+static esp_err_t register_httpd_routes(void)
+{
+    static const web_route_desc_t k_routes[] = {
+        {.uri = "/login", .method = HTTP_GET, .guarded = false, .fn = login_page_handler},
+        {.uri = "/api/auth/login", .method = HTTP_POST, .guarded = false, .fn = auth_login_handler},
+        {.uri = "/api/auth/logout", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_USER, .redirect_on_fail = false, .fn = auth_logout_handler},
+        {.uri = "/api/auth/password", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = auth_password_handler},
+        {.uri = "/api/session/info", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_USER, .redirect_on_fail = false, .fn = session_info_handler},
+        {.uri = "/", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_USER, .redirect_on_fail = true, .fn = root_get_handler},
+        {.uri = "/api/status", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = status_handler},
+        {.uri = "/api/ota/status", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = ota_status_handler},
+        {.uri = "/api/ota/upload", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = ota_upload_handler},
+        {.uri = "/api/ota/reboot", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = ota_reboot_handler},
+        {.uri = "/api/ping", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = ping_handler},
+        {.uri = "/api/config/wifi", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = wifi_config_handler},
+        {.uri = "/api/config/mqtt", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = mqtt_config_handler},
+        {.uri = "/api/config/mqtt_users", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = mqtt_users_handler},
+        {.uri = "/api/config/logging", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = logging_config_handler},
+        {.uri = "/api/wifi/scan", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = wifi_scan_handler},
+        {.uri = "/api/ap/stop", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = ap_stop_handler},
+        {.uri = "/api/audio/play", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = audio_play_handler},
+        {.uri = "/api/audio/stop", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = audio_stop_handler},
+        {.uri = "/api/audio/pause", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = audio_pause_handler},
+        {.uri = "/api/audio/resume", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = audio_resume_handler},
+        {.uri = "/api/audio/volume", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = audio_volume_handler},
+        {.uri = "/api/audio/seek", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = audio_seek_handler},
+        {.uri = "/api/publish", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = publish_handler},
+        {.uri = "/api/files", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = files_handler},
+        {.uri = "/api/devices/config", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_USER, .redirect_on_fail = false, .fn = devices_config_handler},
+        {.uri = "/api/devices/apply", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = devices_apply_handler},
+        {.uri = "/api/devices/run", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_USER, .redirect_on_fail = false, .fn = devices_run_handler},
+        {.uri = "/api/devices/signal/reset", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_USER, .redirect_on_fail = false, .fn = devices_signal_reset_handler},
+        {.uri = "/api/devices/sequence/reset", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_USER, .redirect_on_fail = false, .fn = devices_sequence_reset_handler},
+        {.uri = "/api/devices/profile/create", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = devices_profile_create_handler},
+        {.uri = "/api/devices/profile/delete", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = devices_profile_delete_handler},
+        {.uri = "/api/devices/profile/rename", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = devices_profile_rename_handler},
+        {.uri = "/api/devices/profile/activate", .method = HTTP_POST, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = devices_profile_activate_handler},
+        {.uri = "/api/devices/profile/download", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = devices_profile_download_handler},
+        {.uri = "/api/devices/variables", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = devices_variables_handler},
+        {.uri = "/api/devices/templates", .method = HTTP_GET, .guarded = true, .min_role = WEB_USER_ROLE_ADMIN, .redirect_on_fail = false, .fn = devices_templates_handler},
+    };
+    static web_route_t s_guarded_routes[WEB_ARRAY_SIZE(k_routes)];
+
+    for (size_t i = 0; i < WEB_ARRAY_SIZE(k_routes); ++i) {
+        const web_route_desc_t *desc = &k_routes[i];
+        esp_err_t err;
+
+        if (desc->guarded) {
+            s_guarded_routes[i].fn = desc->fn;
+            s_guarded_routes[i].redirect_on_fail = desc->redirect_on_fail;
+            s_guarded_routes[i].min_role = desc->min_role;
+            err = register_guarded_route(desc->uri, desc->method, &s_guarded_routes[i]);
+        } else {
+            err = register_public_route(desc->uri, desc->method, desc->fn);
+        }
+
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
+    return ESP_OK;
 }
 
 
@@ -98,83 +251,28 @@ static esp_err_t start_httpd(void)
         ESP_LOGE(TAG, "httpd start failed: %s", esp_err_to_name(err));
         return err;
     }
-    ESP_RETURN_ON_ERROR(web_ui_devices_register_assets(s_server), TAG, "devices assets register failed");
+    err = web_ui_devices_register_assets(s_server);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "devices assets register failed: %s", esp_err_to_name(err));
+        (void)stop_httpd();
+        return err;
+    }
 
-    static web_route_t route_root = {.fn = root_get_handler, .redirect_on_fail = true, .min_role = WEB_USER_ROLE_USER};
-    static web_route_t route_ping = {.fn = ping_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_status = {.fn = status_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_ota_status = {.fn = ota_status_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_ota_upload = {.fn = ota_upload_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_ota_reboot = {.fn = ota_reboot_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_wifi = {.fn = wifi_config_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_mqtt = {.fn = mqtt_config_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_mqtt_users = {.fn = mqtt_users_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_logging = {.fn = logging_config_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_wifi_scan = {.fn = wifi_scan_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_ap_stop = {.fn = ap_stop_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_play = {.fn = audio_play_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_stop = {.fn = audio_stop_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_pause = {.fn = audio_pause_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_resume = {.fn = audio_resume_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_vol = {.fn = audio_volume_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_seek = {.fn = audio_seek_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_pub = {.fn = publish_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_files = {.fn = files_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_devices_cfg = {.fn = devices_config_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_USER};
-    static web_route_t route_devices_apply = {.fn = devices_apply_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_devices_run = {.fn = devices_run_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_USER};
-    static web_route_t route_profile_create = {.fn = devices_profile_create_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_profile_delete = {.fn = devices_profile_delete_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_profile_rename = {.fn = devices_profile_rename_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_profile_activate = {.fn = devices_profile_activate_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_profile_download = {.fn = devices_profile_download_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_variables = {.fn = devices_variables_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_templates = {.fn = devices_templates_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_auth_password = {.fn = auth_password_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_ADMIN};
-    static web_route_t route_logout = {.fn = auth_logout_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_USER};
-    static web_route_t route_session_info = {.fn = session_info_handler, .redirect_on_fail = false, .min_role = WEB_USER_ROLE_USER};
+    err = register_httpd_routes();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd route registration failed: %s", esp_err_to_name(err));
+        (void)stop_httpd();
+        return err;
+    }
 
-    ESP_RETURN_ON_ERROR(register_public_route("/login", HTTP_GET, login_page_handler), TAG, "register login");
-    ESP_RETURN_ON_ERROR(register_public_route("/api/auth/login", HTTP_POST, auth_login_handler), TAG, "register auth login");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/auth/logout", HTTP_POST, &route_logout), TAG, "register logout");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/auth/password", HTTP_POST, &route_auth_password), TAG, "register auth password");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/session/info", HTTP_GET, &route_session_info), TAG, "register session info");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/", HTTP_GET, &route_root), TAG, "register root");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/status", HTTP_GET, &route_status), TAG, "register status");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/ota/status", HTTP_GET, &route_ota_status), TAG, "register ota status");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/ota/upload", HTTP_POST, &route_ota_upload), TAG, "register ota upload");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/ota/reboot", HTTP_POST, &route_ota_reboot), TAG, "register ota reboot");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/ping", HTTP_GET, &route_ping), TAG, "register ping");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/config/wifi", HTTP_GET, &route_wifi), TAG, "register wifi cfg");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/config/mqtt", HTTP_GET, &route_mqtt), TAG, "register mqtt cfg");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/config/mqtt_users", HTTP_POST, &route_mqtt_users), TAG, "register mqtt users");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/config/logging", HTTP_GET, &route_logging), TAG, "register logging cfg");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/wifi/scan", HTTP_GET, &route_wifi_scan), TAG, "register wifi scan");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/ap/stop", HTTP_GET, &route_ap_stop), TAG, "register ap stop");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/audio/play", HTTP_GET, &route_play), TAG, "register audio play");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/audio/stop", HTTP_GET, &route_stop), TAG, "register audio stop");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/audio/pause", HTTP_GET, &route_pause), TAG, "register audio pause");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/audio/resume", HTTP_GET, &route_resume), TAG, "register audio resume");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/audio/volume", HTTP_GET, &route_vol), TAG, "register audio volume");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/audio/seek", HTTP_GET, &route_seek), TAG, "register audio seek");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/publish", HTTP_GET, &route_pub), TAG, "register publish");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/files", HTTP_GET, &route_files), TAG, "register files");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/config", HTTP_GET, &route_devices_cfg), TAG, "register devices cfg");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/apply", HTTP_POST, &route_devices_apply), TAG, "register devices apply");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/run", HTTP_GET, &route_devices_run), TAG, "register devices run");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/create", HTTP_POST, &route_profile_create), TAG, "register profile create");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/delete", HTTP_POST, &route_profile_delete), TAG, "register profile delete");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/rename", HTTP_POST, &route_profile_rename), TAG, "register profile rename");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/activate", HTTP_POST, &route_profile_activate), TAG, "register profile activate");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/profile/download", HTTP_GET, &route_profile_download), TAG, "register profile download");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/variables", HTTP_GET, &route_variables), TAG, "register variables");
-    ESP_RETURN_ON_ERROR(register_guarded_route("/api/devices/templates", HTTP_GET, &route_templates), TAG, "register templates");
     return ESP_OK;
 }
 
 esp_err_t web_ui_init(void)
 {
-    web_sessions_init();
+    ESP_RETURN_ON_ERROR(web_ui_restart_state_init(), TAG, "restart state init failed");
+    ESP_RETURN_ON_ERROR(web_ui_system_init(), TAG, "system handlers init failed");
+    ESP_RETURN_ON_ERROR(web_sessions_init(), TAG, "sessions init failed");
     web_auth_start_reset_monitor();
     return ESP_OK;
 }
@@ -224,38 +322,33 @@ void web_ui_report_httpd_error(esp_err_t err, const char *context)
 
 static void web_ui_schedule_httpd_restart(const char *reason)
 {
-    if (s_httpd_restart_pending) {
+    if (!web_ui_try_begin_httpd_restart(reason)) {
         return;
-    }
-    s_httpd_restart_pending = true;
-    if (reason && reason[0]) {
-        strncpy(s_httpd_restart_reason, reason, sizeof(s_httpd_restart_reason) - 1);
-        s_httpd_restart_reason[sizeof(s_httpd_restart_reason) - 1] = '\0';
-    } else {
-        strncpy(s_httpd_restart_reason, "unknown", sizeof(s_httpd_restart_reason) - 1);
-        s_httpd_restart_reason[sizeof(s_httpd_restart_reason) - 1] = '\0';
     }
     if (xTaskCreate(web_ui_httpd_restart_task, "web_ui_httpd_rst", 4096, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "failed to schedule httpd restart");
-        s_httpd_restart_pending = false;
+        web_ui_cancel_httpd_restart();
+        (void)stop_httpd();
     }
 }
 
 static void web_ui_httpd_restart_task(void *param)
 {
-    ESP_LOGW(TAG, "restarting httpd due to %s", s_httpd_restart_reason);
-    if (s_server) {
-        httpd_stop(s_server);
-        s_server = NULL;
+    char reason[sizeof(s_httpd_restart_reason)] = {0};
+    if (s_httpd_restart_lock && xSemaphoreTake(s_httpd_restart_lock, portMAX_DELAY) == pdTRUE) {
+        strncpy(reason, s_httpd_restart_reason, sizeof(reason) - 1);
+        reason[sizeof(reason) - 1] = '\0';
+        xSemaphoreGive(s_httpd_restart_lock);
     }
+    ESP_LOGW(TAG, "restarting httpd due to %s", reason[0] ? reason : "unknown");
+    (void)stop_httpd();
     esp_err_t err = start_httpd();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd restart failed: %s", esp_err_to_name(err));
     } else {
         ESP_LOGI(TAG, "httpd restarted");
     }
-    s_httpd_restart_pending = false;
-    s_httpd_restart_reason[0] = '\0';
+    web_ui_finish_httpd_restart();
     vTaskDelete(NULL);
 }
 

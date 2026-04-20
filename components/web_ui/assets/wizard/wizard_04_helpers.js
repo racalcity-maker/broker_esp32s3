@@ -25,21 +25,10 @@ function refreshTrackPickers() {
   if (!state.detail) {
     return;
   }
-  const inputs = state.detail.querySelectorAll('input[list="track_lookup"]');
+  const inputs = state.detail.querySelectorAll('.dw-track-field input');
   if (inputs.length) {
     ensureTrackLookupOptions();
   }
-  inputs.forEach((input) => {
-    if (input.dataset.pickerBound) {
-      return;
-    }
-    input.dataset.pickerBound = '1';
-    input.addEventListener('focus', () => {
-      if (typeof input.showPicker === 'function') {
-        input.showPicker();
-      }
-    });
-  });
 }
 
 const TRACK_LOOKUP_ROOT = (typeof AUDIO_ROOT === 'string' && AUDIO_ROOT) ? AUDIO_ROOT : '/sdcard';
@@ -71,6 +60,162 @@ function ensureTrackLookupOptions(forceReload) {
     trackLookupPromise = null;
   });
   return trackLookupPromise;
+}
+
+function openTrackPicker(targetInput) {
+  if (!targetInput || !state.trackPickerModal || !state.trackPickerContent) {
+    return;
+  }
+  state.trackPicker.targetInput = targetInput;
+  state.trackPicker.query = '';
+  state.trackPicker.open = true;
+  ensureTrackLookupOptions().finally(() => {
+    renderTrackPicker();
+    state.trackPickerModal.classList.remove('hidden');
+    const search = state.trackPickerContent.querySelector('input[data-track-picker-field="query"]');
+    if (search) {
+      search.focus();
+    }
+  });
+}
+
+function closeTrackPicker() {
+  state.trackPicker.open = false;
+  state.trackPicker.query = '';
+  state.trackPicker.targetInput = null;
+  if (state.trackPickerModal) {
+    state.trackPickerModal.classList.add('hidden');
+  }
+  if (state.trackPickerContent) {
+    state.trackPickerContent.innerHTML = '';
+  }
+}
+
+function getTrackPickerResults() {
+  const query = toSafeString(state.trackPicker.query).trim().toLowerCase();
+  const tracks = Array.isArray(trackLookupCache) ? trackLookupCache : [];
+  if (!query) {
+    return tracks;
+  }
+  return tracks.filter((entry) => {
+    const path = toSafeString(entry?.path).toLowerCase();
+    const name = trackBaseName(entry?.path).toLowerCase();
+    const dir = trackDirName(entry?.path).toLowerCase();
+    return path.includes(query) || name.includes(query) || dir.includes(query);
+  });
+}
+
+function renderTrackPicker() {
+  if (!state.trackPickerContent) {
+    return;
+  }
+  const targetValue = toSafeString(state.trackPicker.targetInput?.value).trim();
+  const results = getTrackPickerResults();
+  const grouped = new Map();
+  results.forEach((entry) => {
+    const dir = trackDirName(entry?.path) || '/';
+    if (!grouped.has(dir)) {
+      grouped.set(dir, []);
+    }
+    grouped.get(dir).push(entry);
+  });
+  const groupsHtml = Array.from(grouped.entries()).map(([dir, entries]) => {
+    const items = entries.map((entry) => {
+      const path = toSafeString(entry?.path);
+      const active = path === targetValue ? ' active' : '';
+      return `<button type="button" class="dw-track-picker-item${active}" data-track-pick="${escapeAttr(path)}">
+        <span class="dw-track-picker-name">${escapeHtml(trackBaseName(path) || path)}</span>
+        <span class="dw-track-picker-path">${escapeHtml(path)}</span>
+      </button>`;
+    }).join('');
+    return `<div class="dw-track-picker-group">
+      <div class="dw-track-picker-group-title">${escapeHtml(dir)}</div>
+      <div class="dw-track-picker-items">${items}</div>
+    </div>`;
+  }).join('');
+
+  state.trackPickerContent.innerHTML = `
+    <div class="dw-track-picker">
+      <div class="dw-track-picker-head">
+        <h3>Choose audio track</h3>
+        <button type="button" class="secondary small" data-action="track-picker-close">Close</button>
+      </div>
+      <div class="dw-field">
+        <label>Search</label>
+        <input data-track-picker-field="query" value="${escapeAttr(state.trackPicker.query || '')}" placeholder="Search by file or folder">
+      </div>
+      <div class="dw-track-picker-current">
+        <span class="dw-track-picker-current-label">Current</span>
+        <span class="dw-track-picker-current-value">${escapeHtml(targetValue || 'No track selected')}</span>
+      </div>
+      <div class="dw-track-picker-results">
+        ${groupsHtml || "<div class='dw-empty'>No tracks found</div>"}
+      </div>
+    </div>`;
+}
+
+function applyTrackPickerValue(value) {
+  const input = state.trackPicker.targetInput;
+  if (!input) {
+    closeTrackPicker();
+    return;
+  }
+  input.value = toSafeString(value);
+  if (input.dataset.stepField) {
+    updateStepField(input.dataset.index, input.dataset.stepField, input);
+  } else if (input.dataset.templateField) {
+    updateTemplateField(input);
+  }
+  renderDeviceDetail();
+  markDirty();
+  closeTrackPicker();
+}
+
+function clearTrackField(input) {
+  if (!input) return;
+  input.value = '';
+  if (input.dataset.stepField) {
+    updateStepField(input.dataset.index, input.dataset.stepField, input);
+  } else if (input.dataset.templateField) {
+    updateTemplateField(input);
+  }
+  renderDeviceDetail();
+  markDirty();
+}
+
+function handleTrackPickerClick(ev) {
+  if (ev.target === state.trackPickerModal) {
+    closeTrackPicker();
+    return;
+  }
+  const btn = ev.target.closest('[data-action], [data-track-pick]');
+  if (!btn) {
+    return;
+  }
+  if (btn.dataset.trackPick !== undefined) {
+    applyTrackPickerValue(btn.dataset.trackPick);
+    return;
+  }
+  if (btn.dataset.action === 'track-picker-close') {
+    closeTrackPicker();
+  }
+}
+
+function handleTrackPickerInput(ev) {
+  const el = ev.target;
+  if (!el || el.dataset.trackPickerField !== 'query') {
+    return;
+  }
+  const caret = typeof el.selectionStart === 'number' ? el.selectionStart : null;
+  state.trackPicker.query = el.value || '';
+  renderTrackPicker();
+  const nextInput = state.trackPickerContent?.querySelector('input[data-track-picker-field="query"]');
+  if (nextInput) {
+    nextInput.focus();
+    if (caret !== null) {
+      nextInput.setSelectionRange(caret, caret);
+    }
+  }
 }
 
 async function collectTrackLookupEntries(root) {
@@ -145,21 +290,8 @@ function updateDeviceField(field, value) {
   const dev = currentDevice();
   if (!dev) return;
   dev[field] = value;
-  if (field === 'display_name') {
-    dev.name = value;
-  } else if (field === 'name' && !dev.display_name) {
-    dev.display_name = value;
-  }
   markDirty();
   refreshRequiredIndicators();
-}
-
-function updateTopicField(indexStr, field, value) {
-  const idx = parseInt(indexStr, 10);
-  const dev = currentDevice();
-  if (!dev || isNaN(idx) || !dev.topics || !dev.topics[idx]) return;
-  dev.topics[idx][field] = value;
-  markDirty();
 }
 
 function updateTemplateField(el) {
@@ -225,6 +357,8 @@ function updateTemplateField(el) {
       const sub = el.dataset.subfield;
       if (sub === 'payload_required') {
         tpl.rules[idx].payload_required = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else if (sub === 'scenario') {
+        if (!setTemplateScenarioReference(dev, 'mqtt-rule', sub, el.dataset.index, el.value)) return;
       } else {
         tpl.rules[idx][sub] = el.value;
       }
@@ -239,6 +373,8 @@ function updateTemplateField(el) {
       const sub = el.dataset.subfield;
       if (sub === 'state') {
         tpl.rules[idx].required_state = el.value === 'true';
+      } else if (sub === 'scenario') {
+        if (!setTemplateScenarioReference(dev, 'flag-rule', sub, el.dataset.index, el.value)) return;
       } else {
         tpl.rules[idx][sub] = el.value;
       }
@@ -252,13 +388,7 @@ function updateTemplateField(el) {
     }
     case 'condition-scenario': {
       ensureConditionTemplate(dev);
-      if (!dev.template?.condition) return;
-      const sub = el.dataset.subfield;
-      if (sub === 'true') {
-        dev.template.condition.true_scenario = el.value;
-      } else if (sub === 'false') {
-        dev.template.condition.false_scenario = el.value;
-      }
+      if (!setTemplateScenarioReference(dev, 'condition-scenario', el.dataset.subfield, '', el.value)) return;
       break;
     }
     case 'condition-rule': {
@@ -285,7 +415,7 @@ function updateTemplateField(el) {
         dev.template.interval.interval_ms = next;
         el.value = next;
       } else if (sub === 'scenario') {
-        dev.template.interval.scenario = el.value;
+        if (!setTemplateScenarioReference(dev, 'interval', sub, '', el.value)) return;
       }
       break;
     }
@@ -315,6 +445,8 @@ function updateTemplateField(el) {
         el.value = next;
       } else if (sub === 'reset_on_error') {
         tpl.reset_on_error = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else if (sub === 'success_scenario' || sub === 'fail_scenario') {
+        if (!setTemplateScenarioReference(dev, 'sequence', sub, '', el.value)) return;
       } else {
         tpl[sub] = el.value;
       }
@@ -327,10 +459,74 @@ function updateTemplateField(el) {
   refreshRequiredIndicators();
 }
 
+function setTemplateScenarioReference(dev, field, subfield, indexStr, value) {
+  if (!dev) return false;
+  const nextValue = toSafeString(value);
+  switch (field) {
+    case 'mqtt-rule': {
+      ensureMqttTemplate(dev);
+      const tpl = dev.template?.mqtt;
+      const idx = parseInt(indexStr, 10);
+      if (!tpl || Number.isNaN(idx) || !tpl.rules[idx] || subfield !== 'scenario') return false;
+      tpl.rules[idx].scenario = nextValue;
+      return true;
+    }
+    case 'flag-rule': {
+      ensureFlagTemplate(dev);
+      const tpl = dev.template?.flag;
+      const idx = parseInt(indexStr, 10);
+      if (!tpl || Number.isNaN(idx) || !tpl.rules[idx] || subfield !== 'scenario') return false;
+      tpl.rules[idx].scenario = nextValue;
+      return true;
+    }
+    case 'condition-scenario': {
+      ensureConditionTemplate(dev);
+      if (!dev.template?.condition) return false;
+      if (subfield === 'true') {
+        dev.template.condition.true_scenario = nextValue;
+        return true;
+      }
+      if (subfield === 'false') {
+        dev.template.condition.false_scenario = nextValue;
+        return true;
+      }
+      return false;
+    }
+    case 'interval': {
+      ensureIntervalTemplate(dev);
+      if (!dev.template?.interval || subfield !== 'scenario') return false;
+      dev.template.interval.scenario = nextValue;
+      return true;
+    }
+    case 'sequence': {
+      ensureSequenceTemplate(dev);
+      const tpl = dev.template?.sequence;
+      if (!tpl) return false;
+      if (subfield === 'success_scenario' || subfield === 'fail_scenario') {
+        tpl[subfield] = nextValue;
+        return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 function updateScenarioField(field, el) {
   const scen = currentScenario();
   if (!scen || !el) return;
   switch (field) {
+    case 'id': {
+      const dev = currentDevice();
+      const prevId = toSafeString(scen.id);
+      const nextId = toSafeString(el.value);
+      scen.id = nextId;
+      if (dev && prevId !== nextId) {
+        updateScenarioReferencesForRename(dev, prevId, nextId);
+      }
+      break;
+    }
     case 'button_enabled': {
       scen.button_enabled = el.type === 'checkbox' ? el.checked : el.value === 'true';
       if (!scen.button_enabled) {
@@ -347,6 +543,42 @@ function updateScenarioField(field, el) {
       break;
   }
   markDirty();
+}
+
+function replaceScenarioRefValue(container, key, prevId, nextId) {
+  if (!container || !key) {
+    return;
+  }
+  if (toSafeString(container[key]) === prevId) {
+    container[key] = nextId;
+  }
+}
+
+function updateScenarioReferencesForRename(dev, prevId, nextId) {
+  if (!dev || !prevId || prevId === nextId || !dev.template) {
+    return;
+  }
+  switch (dev.template.type) {
+    case 'on_mqtt_event':
+      (dev.template.mqtt?.rules || []).forEach((rule) => replaceScenarioRefValue(rule, 'scenario', prevId, nextId));
+      break;
+    case 'on_flag':
+      (dev.template.flag?.rules || []).forEach((rule) => replaceScenarioRefValue(rule, 'scenario', prevId, nextId));
+      break;
+    case 'if_condition':
+      replaceScenarioRefValue(dev.template.condition, 'true_scenario', prevId, nextId);
+      replaceScenarioRefValue(dev.template.condition, 'false_scenario', prevId, nextId);
+      break;
+    case 'interval_task':
+      replaceScenarioRefValue(dev.template.interval, 'scenario', prevId, nextId);
+      break;
+    case 'sequence_lock':
+      replaceScenarioRefValue(dev.template.sequence, 'success_scenario', prevId, nextId);
+      replaceScenarioRefValue(dev.template.sequence, 'fail_scenario', prevId, nextId);
+      break;
+    default:
+      break;
+  }
 }
 
 function updateStepField(indexStr, field, el) {
@@ -887,6 +1119,28 @@ function removeWaitRule(stepIdxStr, reqIdxStr) {
   markDirty();
 }
 
+function addKnownWaitFlag(stepIdxStr, flagName) {
+  const stepIdx = parseInt(stepIdxStr, 10);
+  const scen = currentScenario();
+  const flag = toSafeString(flagName).trim();
+  if (!scen || isNaN(stepIdx) || !flag) return;
+  const step = scen.steps?.[stepIdx];
+  if (!step) return;
+  ensure(step, ['data', 'wait_flags', 'requirements']);
+  const reqs = step.data.wait_flags.requirements;
+  const emptyReq = Array.isArray(reqs) ? reqs.find((req) => req && !toSafeString(req.flag).trim()) : null;
+  if (emptyReq) {
+    emptyReq.flag = flag;
+    if (emptyReq.required_state === undefined) {
+      emptyReq.required_state = true;
+    }
+  } else {
+    reqs.push({flag, required_state: true});
+  }
+  renderDeviceDetail();
+  markDirty();
+}
+
 function normalizeValue(value, type) {
   if (type === 'number') {
     const num = parseInt(value, 10);
@@ -911,8 +1165,11 @@ function normalizeDevice(dev) {
   if (!dev.display_name) {
     dev.display_name = dev.name || dev.id || '';
   }
-  if (!dev.name && dev.display_name) {
-    dev.name = dev.display_name;
+  if (Object.prototype.hasOwnProperty.call(dev, 'name')) {
+    delete dev.name;
+  }
+  if (Object.prototype.hasOwnProperty.call(dev, 'topics')) {
+    delete dev.topics;
   }
   if (!Array.isArray(dev.scenarios)) {
     dev.scenarios = [];

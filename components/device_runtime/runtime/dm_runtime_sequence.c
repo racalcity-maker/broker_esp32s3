@@ -126,3 +126,27 @@ dm_sequence_action_t dm_sequence_runtime_handle(dm_sequence_runtime_t *rt,
     }
     return action;
 }
+
+dm_sequence_action_t dm_sequence_runtime_handle_timeout(dm_sequence_runtime_t *rt,
+                                                        uint64_t now_ms)
+{
+    dm_sequence_action_t action = {
+        .type = DM_SEQUENCE_EVENT_NONE,
+        .step = NULL,
+        .timeout = false,
+    };
+    if (!rt) {
+        return action;
+    }
+    const dm_sequence_template_t *cfg = &rt->config;
+    if (cfg->step_count == 0) {
+        return action;
+    }
+    if (!expired(cfg, rt, now_ms)) {
+        return action;
+    }
+    dm_sequence_runtime_reset(rt);
+    action.type = DM_SEQUENCE_EVENT_FAILED;
+    action.timeout = true;
+    return action;
+}

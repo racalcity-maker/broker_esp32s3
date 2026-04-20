@@ -70,23 +70,50 @@ void audio_player_status_set_play(const char *path, audio_format_t fmt, int volu
     status_unlock();
 }
 
-void audio_player_status_set_paused(bool paused)
+void audio_player_status_set_runtime_state(audio_runtime_state_t state)
 {
     status_lock();
-    s_status.paused = paused;
-    status_unlock();
-}
-
-void audio_player_status_set_playing(bool playing)
-{
-    status_lock();
-    s_status.playing = playing;
-    if (!playing) {
+    switch (state) {
+    case AUDIO_RUNTIME_STARTING:
+    case AUDIO_RUNTIME_PLAYING:
+        s_status.playing = true;
+        s_status.paused = false;
+        s_status.bitrate_kbps = 0;
+        break;
+    case AUDIO_RUNTIME_PAUSED:
+        s_status.playing = true;
+        s_status.paused = true;
+        s_status.bitrate_kbps = 0;
+        break;
+    case AUDIO_RUNTIME_IDLE:
+        s_status.playing = false;
         s_status.paused = false;
         s_status.progress = 0;
         s_status.pos_ms = 0;
         s_status.dur_ms = 0;
         s_status.bitrate_kbps = 0;
+        s_status.fmt = AUDIO_PLAYER_FMT_UNKNOWN;
+        s_status.path[0] = 0;
+        break;
+    case AUDIO_RUNTIME_STOPPING:
+        s_status.playing = false;
+        s_status.paused = false;
+        s_status.progress = 0;
+        s_status.pos_ms = 0;
+        s_status.dur_ms = 0;
+        s_status.bitrate_kbps = 0;
+        break;
+    case AUDIO_RUNTIME_ERROR:
+    default:
+        s_status.playing = false;
+        s_status.paused = false;
+        s_status.progress = 0;
+        s_status.pos_ms = 0;
+        s_status.dur_ms = 0;
+        s_status.bitrate_kbps = 0;
+        s_status.fmt = AUDIO_PLAYER_FMT_UNKNOWN;
+        s_status.path[0] = 0;
+        break;
     }
     status_unlock();
 }

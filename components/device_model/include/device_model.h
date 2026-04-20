@@ -7,11 +7,6 @@
 #include "dm_limits.h"
 #include "dm_template_registry.h"
 
-typedef struct {
-    char name[DEVICE_MANAGER_NAME_MAX_LEN];
-    char topic[DEVICE_MANAGER_TOPIC_MAX_LEN];
-} device_topic_binding_t;
-
 typedef enum {
     DEVICE_ACTION_NOP = 0,
     DEVICE_ACTION_MQTT_PUBLISH,
@@ -85,8 +80,6 @@ typedef struct {
 typedef struct {
     char id[DEVICE_MANAGER_ID_MAX_LEN];
     char display_name[DEVICE_MANAGER_NAME_MAX_LEN];
-    uint8_t topic_count;
-    device_topic_binding_t topics[DEVICE_MANAGER_MAX_TOPICS_PER_DEVICE];
     uint8_t scenario_count;
     device_scenario_t scenarios[DEVICE_MANAGER_MAX_SCENARIOS_PER_DEVICE];
     bool template_assigned;

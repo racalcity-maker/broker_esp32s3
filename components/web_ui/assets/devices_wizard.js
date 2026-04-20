@@ -4,13 +4,13 @@
 const ACTION_TYPES = ['mqtt_publish','audio_play','audio_stop','set_flag','wait_flags','loop','delay','event','nop'];
 const TEMPLATE_TYPES = [
   {value: '', label: 'No template'},
-  {value: 'uid_validator', label: 'UID validator'},
-  {value: 'signal_hold', label: 'Signal hold'},
-  {value: 'on_mqtt_event', label: 'MQTT trigger'},
-  {value: 'on_flag', label: 'Flag trigger'},
-  {value: 'if_condition', label: 'Conditional scenario'},
-  {value: 'interval_task', label: 'Interval task'},
-  {value: 'sequence_lock', label: 'Sequence lock'},
+  {value: 'uid_validator', label: 'UID Validator'},
+  {value: 'signal_hold', label: 'Signal Hold'},
+  {value: 'on_mqtt_event', label: 'When MQTT message arrives'},
+  {value: 'on_flag', label: 'When flag changes'},
+  {value: 'if_condition', label: 'Conditional branch'},
+  {value: 'interval_task', label: 'Run on interval'},
+  {value: 'sequence_lock', label: 'Sequence Lock'},
 ];
 const MQTT_RULE_LIMIT = 8;
 const FLAG_RULE_LIMIT = 8;
@@ -25,7 +25,6 @@ const WIZARD_TEMPLATES = {
     fields: [],
     build(base) {
       base.scenarios = [];
-      base.topics = [];
       return base;
     },
   },
@@ -41,6 +40,9 @@ const state = {
   json: null,
   jsonWrap: null,
   statusEl: null,
+  validationEl: null,
+  trackPickerModal: null,
+  trackPickerContent: null,
   model: null,
   profiles: [],
   activeProfile: '',
@@ -50,6 +52,12 @@ const state = {
   busy: false,
   dirty: false,
   jsonVisible: false,
+  validation: {errors: [], warnings: []},
+  trackPicker: {
+    open: false,
+    query: '',
+    targetInput: null,
+  },
   wizard: {
     open: false,
     step: 0,
@@ -124,12 +132,16 @@ function buildShell() {
         <button class="primary" data-action="save">Save changes</button>
         <span class="dw-status" id="dw_status">Not loaded</span>
       </div>
+      <div class="dw-validation hidden" id="dw_validation"></div>
       <div class="dw-layout">
         <div class="dw-list" id="dw_device_list"></div>
         <div class="dw-detail" id="dw_device_detail"></div>
       </div>
       <div class="dw-json collapsed" id="dw_json_panel">
         <pre class="dw-json-content" id="dw_json_preview">No config</pre>
+      </div>
+      <div class="dw-modal hidden" id="dw_track_picker_modal">
+        <div class="dw-modal-content" id="dw_track_picker_content"></div>
       </div>
       <div class="dw-modal hidden" id="dw_wizard_modal">
         <div class="dw-modal-content" id="dw_wizard_content"></div>
@@ -142,6 +154,9 @@ function buildShell() {
   state.json = document.getElementById('dw_json_preview');
   state.jsonWrap = document.getElementById('dw_json_panel');
   state.statusEl = document.getElementById('dw_status');
+  state.validationEl = document.getElementById('dw_validation');
+  state.trackPickerModal = document.getElementById('dw_track_picker_modal');
+  state.trackPickerContent = document.getElementById('dw_track_picker_content');
   state.wizardModal = document.getElementById('dw_wizard_modal');
   state.wizardContent = document.getElementById('dw_wizard_content');
   state.profileList = document.getElementById('dw_profile_list');
@@ -209,8 +224,18 @@ function attachEvents() {
   });
   state.actionsRoot?.addEventListener('click', (ev) => {
     const btn = ev.target.closest('[data-run-device][data-run-scenario]');
-    if (!btn) return;
-    runScenario(btn.dataset.runDevice, btn.dataset.runScenario);
+    if (btn) {
+      runScenario(btn.dataset.runDevice, btn.dataset.runScenario);
+      return;
+    }
+    const signalResetBtn = ev.target.closest('[data-signal-reset-device]');
+    if (signalResetBtn) {
+      resetSignal(signalResetBtn.dataset.signalResetDevice, signalResetBtn);
+      return;
+    }
+    const resetBtn = ev.target.closest('[data-sequence-reset-device]');
+    if (!resetBtn) return;
+    resetSequence(resetBtn.dataset.sequenceResetDevice, resetBtn);
   });
 
   state.list?.addEventListener('click', (ev) => {
@@ -228,6 +253,8 @@ function attachEvents() {
   state.detail?.addEventListener('change', handleDetailInput);
   state.detail?.addEventListener('click', handleDetailClick);
 
+  state.trackPickerModal?.addEventListener('click', handleTrackPickerClick);
+  state.trackPickerModal?.addEventListener('input', handleTrackPickerInput);
   state.wizardModal?.addEventListener('click', handleWizardClick);
   state.wizardModal?.addEventListener('input', handleWizardInput);
 }
@@ -249,12 +276,10 @@ function handleDetailClick(ev) {
   if (!btn) return;
   const action = btn.dataset.action;
   switch (action) {
-    case 'add-topic': addTopic(); break;
-    case 'remove-topic': removeTopic(btn.dataset.index); break;
     case 'add-scenario': addScenario(); break;
     case 'remove-scenario': removeScenario(btn.dataset.index); break;
     case 'select-scenario': selectScenario(btn.dataset.index); break;
-    case 'add-step': addStep(); break;
+    case 'add-step': addStep(btn.dataset.stepType); break;
     case 'remove-step': removeStep(btn.dataset.index); break;
     case 'step-up': moveStep(btn.dataset.index, -1); break;
     case 'step-down': moveStep(btn.dataset.index, 1); break;
@@ -270,6 +295,10 @@ function handleDetailClick(ev) {
     case 'condition-rule-remove': removeConditionRule(btn.dataset.index); break;
     case 'sequence-step-add': addSequenceStep(); break;
     case 'sequence-step-remove': removeSequenceStep(btn.dataset.index); break;
+    case 'template-new-scenario': addScenarioForReference(btn.dataset.templateField, btn.dataset.subfield, btn.dataset.index); break;
+    case 'wait-add-known-flag': addKnownWaitFlag(btn.dataset.stepIndex, btn.dataset.flag); break;
+    case 'track-picker-open': openTrackPicker(btn.closest('.dw-track-field')?.querySelector('input')); break;
+    case 'track-picker-clear': clearTrackField(btn.closest('.dw-track-field')?.querySelector('input')); break;
   }
 }
 
@@ -278,10 +307,6 @@ function handleDetailInput(ev) {
   if (!el) return;
   if (el.dataset.deviceField) {
     updateDeviceField(el.dataset.deviceField, el.value);
-    return;
-  }
-  if (el.dataset.topicField) {
-    updateTopicField(el.dataset.index, el.dataset.topicField, el.value);
     return;
   }
   if (el.dataset.scenarioField) {
@@ -332,6 +357,12 @@ function loadModel() {
 
 function saveModel() {
   if (!state.model || state.busy) return;
+  updateValidationState();
+  if ((state.validation?.errors || []).length) {
+    renderValidationOverview();
+    setStatus(`Fix validation errors before saving (${state.validation.errors.length})`, '#f87171');
+    return;
+  }
   setStatus('Saving...', '#fbbf24');
   state.busy = true;
   const payload = prepareConfigForSave(state.model);
@@ -359,15 +390,19 @@ function saveModel() {
 
 function markDirty() {
   state.dirty = true;
+  updateValidationState();
   renderJson();
+  renderValidationOverview();
   updateToolbar();
   renderActions();
 }
 
 function renderAll() {
+  updateValidationState();
   renderDeviceList();
   renderDeviceDetail();
   renderJson();
+  renderValidationOverview();
   updateToolbar();
   updateGlobals();
   renderProfiles();
@@ -414,7 +449,7 @@ function renderDeviceList() {
   }
   state.list.innerHTML = devices.map((dev, idx) => {
     const active = idx === state.selectedDevice ? ' active' : '';
-    const name = escapeHtml(dev.display_name || dev.name || dev.id || ('Device ' + (idx + 1)));
+    const name = escapeHtml(dev.display_name || dev.id || ('Device ' + (idx + 1)));
     const scenarios = (dev.scenarios || []).length;
     return `<div class="dw-device-item${active}" data-device-index="${idx}">
       <span>${name}</span>
@@ -440,15 +475,168 @@ function renderDeviceDetail() {
       </div>
       <div class="dw-field">
         <label>Display name</label>
-        <input data-device-field="display_name" value="${escapeAttr(dev.display_name || dev.name || '')}" placeholder="Visible name">
+        <input data-device-field="display_name" value="${escapeAttr(dev.display_name || '')}" placeholder="Visible name">
       </div>
     </div>
   ${renderTemplateSection(dev)}
-  ${renderTopicsSection(dev)}
   ${renderScenariosSection(dev)}
+  ${renderFlagLookupDatalist(dev)}
   `;
   validateRequiredFields();
   refreshTrackPickers();
+}
+
+function renderTrackField(label, attrs, value, placeholder) {
+  return `
+    <div class="dw-field">
+      <label>${escapeHtml(label)}</label>
+      <div class="dw-track-field">
+        <input ${attrs} value="${escapeAttr(value || '')}" placeholder="${escapeAttr(placeholder || '')}">
+        <button class="secondary small" type="button" data-action="track-picker-open">Choose</button>
+        <button class="secondary small" type="button" data-action="track-picker-clear">Clear</button>
+      </div>
+    </div>`;
+}
+
+function collectKnownFlags(dev) {
+  const flags = new Set();
+  const addFlag = (value) => {
+    const flag = toSafeString(value).trim();
+    if (flag) {
+      flags.add(flag);
+    }
+  };
+  if (!dev || typeof dev !== 'object') {
+    return [];
+  }
+  (dev.template?.flag?.rules || []).forEach((rule) => addFlag(rule?.flag));
+  (dev.template?.condition?.rules || []).forEach((rule) => addFlag(rule?.flag));
+  (dev.scenarios || []).forEach((scen) => {
+    (scen?.steps || []).forEach((step) => {
+      if (step?.type === 'set_flag') {
+        addFlag(step?.data?.flag?.flag || step?.flag);
+      } else if (step?.type === 'wait_flags') {
+        (step?.data?.wait_flags?.requirements || []).forEach((req) => addFlag(req?.flag));
+      }
+    });
+  });
+  return Array.from(flags).sort((a, b) => a.localeCompare(b));
+}
+
+function renderFlagLookupDatalist(dev) {
+  const flags = collectKnownFlags(dev);
+  if (!flags.length) {
+    return '';
+  }
+  const options = flags.map((flag) => `<option value="${escapeAttr(flag)}"></option>`).join('');
+  return `<datalist id="flag_lookup">${options}</datalist>`;
+}
+
+function collectTemplateScenarioRefs(dev) {
+  const refs = new Map();
+  if (!dev || !dev.template) {
+    return refs;
+  }
+  const addRef = (scenarioId, source) => {
+    const id = toSafeString(scenarioId).trim();
+    if (!id) {
+      return;
+    }
+    if (!refs.has(id)) {
+      refs.set(id, {sources: []});
+    }
+    const ref = refs.get(id);
+    if (!ref.sources.includes(source)) {
+      ref.sources.push(source);
+    }
+  };
+
+  switch (dev.template.type) {
+    case 'on_mqtt_event':
+      (dev.template.mqtt?.rules || []).forEach((rule, idx) => addRef(rule?.scenario, `MQTT trigger ${idx + 1}`));
+      break;
+    case 'on_flag':
+      (dev.template.flag?.rules || []).forEach((rule, idx) => addRef(rule?.scenario, `Flag trigger ${idx + 1}`));
+      break;
+    case 'if_condition':
+      addRef(dev.template.condition?.true_scenario, 'Condition branch: TRUE');
+      addRef(dev.template.condition?.false_scenario, 'Condition branch: FALSE');
+      break;
+    case 'interval_task':
+      addRef(dev.template.interval?.scenario, 'Interval action');
+      break;
+    case 'sequence_lock':
+      addRef(dev.template.sequence?.success_scenario, 'Sequence result: success');
+      addRef(dev.template.sequence?.fail_scenario, 'Sequence result: fail');
+      break;
+    default:
+      break;
+  }
+
+  return refs;
+}
+
+function renderScenarioBadges(meta) {
+  const badges = [];
+  if (meta?.templateLinked) {
+    badges.push(`<span class="dw-chip required">required</span>`);
+    badges.push(`<span class="dw-chip linked">used by template</span>`);
+  } else {
+    badges.push(`<span class="dw-chip manual">manual</span>`);
+  }
+  return badges.join('');
+}
+
+function collectScenarioUsage(dev, scen) {
+  const usage = [];
+  const scenarioId = toSafeString(scen?.id).trim();
+  if (!dev || !scenarioId) {
+    return usage;
+  }
+  const templateRef = collectTemplateScenarioRefs(dev).get(scenarioId);
+  if (templateRef?.sources?.length) {
+    templateRef.sources.forEach((source) => usage.push(source));
+  }
+  if (scen?.button_enabled) {
+    usage.push('Actions tab button');
+  }
+  return usage;
+}
+
+function renderScenarioListGroup(title, items) {
+  return `
+    <div class="dw-scenario-group">
+      <div class="dw-scenario-group-title">${escapeHtml(title)}</div>
+      ${items || "<div class='dw-list-empty'>No scenarios</div>"}
+    </div>`;
+}
+
+function renderScenarioRefField(dev, label, field, subfield, value, index) {
+  const scenarios = Array.isArray(dev?.scenarios) ? dev.scenarios : [];
+  const currentValue = toSafeString(value);
+  const options = [`<option value="">Select scenario</option>`].concat(
+    scenarios.map((scen) => {
+      const scenarioId = toSafeString(scen?.id).trim();
+      if (!scenarioId) {
+        return '';
+      }
+      const scenarioName = toSafeString(scen?.name).trim();
+      const optionLabel = scenarioName && scenarioName !== scenarioId
+        ? `${scenarioName} (${scenarioId})`
+        : scenarioId;
+      return `<option value="${escapeAttr(scenarioId)}" ${scenarioId === currentValue ? 'selected' : ''}>${escapeHtml(optionLabel)}</option>`;
+    }).filter(Boolean)
+  ).join('');
+  const safeIndex = typeof index === 'number' && !Number.isNaN(index) ? ` data-index="${index}"` : '';
+  return `
+    <div class="dw-field">
+      <label>${label}</label>
+      <div class="dw-inline-actions">
+        <select data-template-field="${field}" data-subfield="${subfield}"${safeIndex}>${options}</select>
+        <button class="secondary small" type="button" data-action="template-new-scenario" data-template-field="${field}" data-subfield="${subfield}"${safeIndex}>+ New</button>
+      </div>
+      <div class="dw-hint small">Uses scenarios from this device. Manual ID stays in the scenario editor.</div>
+    </div>`;
 }
 
 function validateRequiredFields() {
@@ -474,6 +662,7 @@ function validateRequiredFields() {
 function renderTemplateSection(dev) {
   const tplType = dev.template?.type || '';
   const options = TEMPLATE_TYPES.map((tpl) => `<option value="${tpl.value}" ${tpl.value === tplType ? 'selected' : ''}>${tpl.label}</option>`).join('');
+  const hint = templateTypeHint(tplType);
   let body = "<div class='dw-empty small'>Template is not set.</div>";
   if (tplType === 'uid_validator') {
     body = renderUidTemplate(dev);
@@ -498,9 +687,31 @@ function renderTemplateSection(dev) {
       <div class="dw-field">
         <label>Template type</label>
         <select data-template-field="type">${options}</select>
+        <div class="dw-hint small">${escapeHtml(hint)}</div>
       </div>
       ${body}
     </div>`;
+}
+
+function templateTypeHint(type) {
+  switch (type) {
+    case 'uid_validator':
+      return 'Validate UID input, react to success or failure, and optionally control background audio.';
+    case 'signal_hold':
+      return 'Keep a signal active for a period and optionally play hold or completion audio.';
+    case 'on_mqtt_event':
+      return 'Watch MQTT messages and launch scenarios when a trigger rule matches.';
+    case 'on_flag':
+      return 'Watch automation flags and run scenarios when a flag trigger matches.';
+    case 'if_condition':
+      return 'Evaluate a condition and branch into TRUE or FALSE scenarios.';
+    case 'interval_task':
+      return 'Run one scenario on a fixed interval.';
+    case 'sequence_lock':
+      return 'Guide a multi-step sequence with success and failure branches.';
+    default:
+      return 'Choose a template if this device should react automatically instead of only exposing manual scenarios.';
+  }
 }
 
 function renderUidTemplate(dev) {
@@ -550,13 +761,13 @@ function renderUidTemplate(dev) {
       <h5>Success actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="uid-action" data-subfield="success_topic" value="${escapeAttr(tpl.success_topic || '')}" placeholder="quest/ok"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="uid-action" data-subfield="success_payload" value="${escapeAttr(tpl.success_payload || '')}" placeholder="payload"></div>
-      <div class="dw-field"><label>Audio track</label><input data-template-field="uid-action" data-subfield="success_audio_track" value="${escapeAttr(tpl.success_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/ok.mp3" list="track_lookup"></div>
+      ${renderTrackField('Audio track', `data-template-field="uid-action" data-subfield="success_audio_track"`, tpl.success_audio_track || '', `${TRACK_LOOKUP_ROOT}/ok.mp3`)}
     </div>
     <div class="dw-section">
       <h5>Fail actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="uid-action" data-subfield="fail_topic" value="${escapeAttr(tpl.fail_topic || '')}" placeholder="quest/fail"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="uid-action" data-subfield="fail_payload" value="${escapeAttr(tpl.fail_payload || '')}" placeholder="payload"></div>
-      <div class="dw-field"><label>Audio track</label><input data-template-field="uid-action" data-subfield="fail_audio_track" value="${escapeAttr(tpl.fail_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/fail.mp3" list="track_lookup"></div>
+      ${renderTrackField('Audio track', `data-template-field="uid-action" data-subfield="fail_audio_track"`, tpl.fail_audio_track || '', `${TRACK_LOOKUP_ROOT}/fail.mp3`)}
     </div>`;
 }
 
@@ -573,9 +784,9 @@ function renderSignalTemplate(dev) {
       <div class="dw-field"><label>Reset topic</label><input data-template-field="signal" data-subfield="reset_topic" value="${escapeAttr(sig.reset_topic || '')}" placeholder="laser/reset"><div class="dw-hint small">Опубликуйте любое сообщение сюда, чтобы остановить трек и обнулить прогресс удержания.</div></div>
       <div class="dw-field required"><label>Required hold ms</label><input type="number" data-template-field="signal" data-subfield="required_hold_ms" value="${sig.required_hold_ms || 0}" data-required="true" data-required-rule="positive"><div class="dw-hint small">Минимальная длительность удержания в миллисекундах.</div></div>
       <div class="dw-field"><label>Heartbeat timeout ms</label><input type="number" data-template-field="signal" data-subfield="heartbeat_timeout_ms" value="${sig.heartbeat_timeout_ms || 0}"></div>
-      <div class="dw-field"><label>Hold track</label><input data-template-field="signal" data-subfield="hold_track" value="${escapeAttr(sig.hold_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/hold.mp3" list="track_lookup"></div>
+      ${renderTrackField('Hold track', `data-template-field="signal" data-subfield="hold_track"`, sig.hold_track || '', `${TRACK_LOOKUP_ROOT}/hold.mp3`)}
       <div class="dw-field"><label>Loop hold track</label><select data-template-field="signal" data-subfield="hold_track_loop"><option value="false" ${sig.hold_track_loop ? '' : 'selected'}>No</option><option value="true" ${sig.hold_track_loop ? 'selected' : ''}>Yes</option></select></div>
-      <div class="dw-field"><label>Complete track</label><input data-template-field="signal" data-subfield="complete_track" value="${escapeAttr(sig.complete_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/done.mp3" list="track_lookup"></div>
+      ${renderTrackField('Complete track', `data-template-field="signal" data-subfield="complete_track"`, sig.complete_track || '', `${TRACK_LOOKUP_ROOT}/done.mp3`)}
     </div>`;
 }
 
@@ -584,24 +795,31 @@ function renderMqttTemplate(dev) {
   const tpl = dev.template?.mqtt || {rules: []};
   const rules = (tpl.rules || []).map((rule, idx) => {
     const checked = rule.payload_required ? 'checked' : '';
+    const topicText = toSafeString(rule.topic).trim() || 'any topic';
+    const payloadText = rule.payload_required
+      ? (toSafeString(rule.payload).trim() || 'exact payload')
+      : 'any payload';
+    const scenarioText = toSafeString(rule.scenario).trim() || 'no scenario selected';
     return `
     <div class="dw-slot">
-      <div class="dw-slot-head">Rule ${idx + 1}<button class="danger small" data-action="mqtt-rule-remove" data-index="${idx}">&times;</button></div>
-      <div class="dw-field"><label>Name</label><input data-template-field="mqtt-rule" data-subfield="name" data-index="${idx}" value="${escapeAttr(rule.name || '')}" placeholder="Optional"></div>
-      <div class="dw-field"><label>Topic</label><input data-template-field="mqtt-rule" data-subfield="topic" data-index="${idx}" value="${escapeAttr(rule.topic || '')}" placeholder="sensor/topic"></div>
-      <div class="dw-field"><label>Payload</label><input data-template-field="mqtt-rule" data-subfield="payload" data-index="${idx}" value="${escapeAttr(rule.payload || '')}" placeholder="payload"></div>
-      <div class="dw-field dw-checkbox-field"><label><input type="checkbox" data-template-field="mqtt-rule" data-subfield="payload_required" data-index="${idx}" ${checked}>Match payload</label></div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="mqtt-rule" data-subfield="scenario" data-index="${idx}" value="${escapeAttr(rule.scenario || '')}" placeholder="scenario_id"></div>
+      <div class="dw-slot-head">MQTT trigger ${idx + 1}<button class="danger small" data-action="mqtt-rule-remove" data-index="${idx}">&times;</button></div>
+      <div class="dw-hint small">When topic <strong>${escapeHtml(topicText)}</strong> arrives with <strong>${escapeHtml(payloadText)}</strong>, run <strong>${escapeHtml(scenarioText)}</strong>.</div>
+      <div class="dw-field"><label>Trigger label</label><input data-template-field="mqtt-rule" data-subfield="name" data-index="${idx}" value="${escapeAttr(rule.name || '')}" placeholder="Optional note for this trigger"></div>
+      <div class="dw-field required"><label>Topic filter</label><input data-template-field="mqtt-rule" data-subfield="topic" data-index="${idx}" value="${escapeAttr(rule.topic || '')}" placeholder="sensor/topic" data-required="true"></div>
+      <div class="dw-field"><label>Payload filter</label><input data-template-field="mqtt-rule" data-subfield="payload" data-index="${idx}" value="${escapeAttr(rule.payload || '')}" placeholder="payload"></div>
+      <div class="dw-field dw-checkbox-field"><label><input type="checkbox" data-template-field="mqtt-rule" data-subfield="payload_required" data-index="${idx}" ${checked}>Require payload match</label></div>
+      ${renderScenarioRefField(dev, 'Run scenario', 'mqtt-rule', 'scenario', rule.scenario || '', idx)}
     </div>`;
   }).join('');
   return `
     <div class="dw-section">
       <div class="dw-section-head">
-        <span>MQTT rules</span>
-        <button data-action="mqtt-rule-add">Add rule</button>
+        <span>MQTT triggers</span>
+        <button data-action="mqtt-rule-add">Add trigger</button>
       </div>
+      <div class="dw-hint small">Use this template for inbound MQTT-driven scenarios. It replaces the old per-device topic bindings.</div>
       ${rules || "<div class='dw-empty small'>No rules configured.</div>"}
-      <div class="dw-hint small">Leave payload empty to match any payload.</div>
+      <div class="dw-hint small">Leave payload filtering disabled to react to any payload on the selected topic.</div>
     </div>`;
 }
 
@@ -621,7 +839,7 @@ function renderFlagTemplate(dev) {
           <option value="false" ${!rule.required_state ? 'selected' : ''}>Flag becomes FALSE</option>
         </select>
       </div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="flag-rule" data-subfield="scenario" data-index="${idx}" value="${escapeAttr(rule.scenario || '')}" placeholder="scenario_id"></div>
+      ${renderScenarioRefField(dev, 'Scenario', 'flag-rule', 'scenario', rule.scenario || '', idx)}
     </div>`;
   }).join('');
   return `
@@ -660,8 +878,8 @@ function renderConditionTemplate(dev) {
           <option value="any" ${tpl.mode === 'any' ? 'selected' : ''}>Any condition</option>
         </select>
       </div>
-      <div class="dw-field"><label>Scenario if TRUE</label><input data-template-field="condition-scenario" data-subfield="true" value="${escapeAttr(tpl.true_scenario || '')}" placeholder="scenario_true"></div>
-      <div class="dw-field"><label>Scenario if FALSE</label><input data-template-field="condition-scenario" data-subfield="false" value="${escapeAttr(tpl.false_scenario || '')}" placeholder="scenario_false"></div>
+      ${renderScenarioRefField(dev, 'Scenario if TRUE', 'condition-scenario', 'true', tpl.true_scenario || '')}
+      ${renderScenarioRefField(dev, 'Scenario if FALSE', 'condition-scenario', 'false', tpl.false_scenario || '')}
     </div>
     <div class="dw-section">
       <div class="dw-section-head">
@@ -681,7 +899,7 @@ function renderIntervalTemplate(dev) {
     <div class="dw-section">
       <div class="dw-section-head"><span>Interval task</span></div>
       <div class="dw-field"><label>Interval (ms)</label><input type="number" min="1" data-template-field="interval" data-subfield="interval_ms" value="${intervalMs}"></div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="interval" data-subfield="scenario" value="${escapeAttr(tpl.scenario || '')}" placeholder="scenario_id"></div>
+      ${renderScenarioRefField(dev, 'Scenario', 'interval', 'scenario', tpl.scenario || '')}
       <div class="dw-hint small">Runs the selected scenario on a fixed interval.</div>
     </div>`;
 }
@@ -699,7 +917,7 @@ function renderSequenceTemplate(dev) {
         <div class="dw-field dw-checkbox-field"><label><input type="checkbox" data-template-field="sequence-step" data-subfield="payload_required" data-index="${idx}" ${checked}>Require exact payload</label></div>
         <div class="dw-field"><label>Hint topic</label><input data-template-field="sequence-step" data-subfield="hint_topic" data-index="${idx}" value="${escapeAttr(step.hint_topic || '')}" placeholder="hint/topic"></div>
         <div class="dw-field"><label>Hint payload</label><input data-template-field="sequence-step" data-subfield="hint_payload" data-index="${idx}" value="${escapeAttr(step.hint_payload || '')}" placeholder="payload"></div>
-        <div class="dw-field"><label>Hint audio track</label><input data-template-field="sequence-step" data-subfield="hint_audio_track" data-index="${idx}" value="${escapeAttr(step.hint_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/hint.mp3" list="track_lookup"></div>
+        ${renderTrackField('Hint audio track', `data-template-field="sequence-step" data-subfield="hint_audio_track" data-index="${idx}"`, step.hint_audio_track || '', `${TRACK_LOOKUP_ROOT}/hint.mp3`)}
       </div>`;
   }).join('');
   return `
@@ -719,48 +937,41 @@ function renderSequenceTemplate(dev) {
       <h5>Success actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="sequence" data-subfield="success_topic" value="${escapeAttr(tpl.success_topic || '')}" placeholder="quest/sequence/success"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="sequence" data-subfield="success_payload" value="${escapeAttr(tpl.success_payload || '')}" placeholder="payload"></div>
-      <div class="dw-field"><label>Audio track</label><input data-template-field="sequence" data-subfield="success_audio_track" value="${escapeAttr(tpl.success_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/success.mp3" list="track_lookup"></div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="sequence" data-subfield="success_scenario" value="${escapeAttr(tpl.success_scenario || '')}" placeholder="scenario_success"></div>
+      ${renderTrackField('Audio track', `data-template-field="sequence" data-subfield="success_audio_track"`, tpl.success_audio_track || '', `${TRACK_LOOKUP_ROOT}/success.mp3`)}
+      ${renderScenarioRefField(dev, 'Scenario', 'sequence', 'success_scenario', tpl.success_scenario || '')}
     </div>
     <div class="dw-section">
       <h5>Fail actions</h5>
       <div class="dw-field"><label>MQTT topic</label><input data-template-field="sequence" data-subfield="fail_topic" value="${escapeAttr(tpl.fail_topic || '')}" placeholder="quest/sequence/fail"></div>
       <div class="dw-field"><label>Payload</label><input data-template-field="sequence" data-subfield="fail_payload" value="${escapeAttr(tpl.fail_payload || '')}" placeholder="payload"></div>
-      <div class="dw-field"><label>Audio track</label><input data-template-field="sequence" data-subfield="fail_audio_track" value="${escapeAttr(tpl.fail_audio_track || '')}" placeholder="${TRACK_LOOKUP_ROOT}/fail.mp3" list="track_lookup"></div>
-      <div class="dw-field"><label>Scenario ID</label><input data-template-field="sequence" data-subfield="fail_scenario" value="${escapeAttr(tpl.fail_scenario || '')}" placeholder="scenario_fail"></div>
+      ${renderTrackField('Audio track', `data-template-field="sequence" data-subfield="fail_audio_track"`, tpl.fail_audio_track || '', `${TRACK_LOOKUP_ROOT}/fail.mp3`)}
+      ${renderScenarioRefField(dev, 'Scenario', 'sequence', 'fail_scenario', tpl.fail_scenario || '')}
       <div class="dw-hint small">Failure actions run when timeout expires or an unexpected topic arrives.</div>
     </div>`;
 }
 
-function renderTopicsSection(dev) {
-  const rows = (dev.topics || []).map((topic, idx) => `
-    <tr>
-      <td><input data-topic-field="name" data-index="${idx}" value="${escapeAttr(topic.name || '')}" placeholder="Name"></td>
-      <td><input data-topic-field="topic" data-index="${idx}" value="${escapeAttr(topic.topic || '')}" placeholder="mqtt/topic"></td>
-      <td><button class="danger small" data-action="remove-topic" data-index="${idx}">&times;</button></td>
-    </tr>`).join('');
-  return `
-    <div class="dw-section">
-      <div class="dw-section-head">
-        <h4>Topics</h4>
-        <div class="dw-table-actions"><button data-action="add-topic">Add topic</button></div>
-      </div>
-      <table class="dw-mini-table">
-        <thead><tr><th>Name</th><th>Topic</th><th></th></tr></thead>
-        <tbody>${rows || "<tr><td colspan='3' class='muted small'>No topics</td></tr>"}</tbody>
-      </table>
-    </div>`;
-}
-
 function renderScenariosSection(dev) {
-  const items = (dev.scenarios || []).map((sc, idx) => {
+  const templateRefs = collectTemplateScenarioRefs(dev);
+  const templateItems = [];
+  const customItems = [];
+  (dev.scenarios || []).forEach((sc, idx) => {
     const active = idx === state.selectedScenario ? ' active' : '';
     const title = escapeHtml(sc.name || sc.id || ('Scenario ' + (idx + 1)));
-    return `<div class="dw-scenario-item${active}" data-action="select-scenario" data-index="${idx}">
-      <span>${title}</span>
+    const scenarioId = toSafeString(sc?.id).trim();
+    const refMeta = scenarioId ? templateRefs.get(scenarioId) : null;
+    const item = `<div class="dw-scenario-item${active}" data-action="select-scenario" data-index="${idx}">
+      <div class="dw-scenario-main">
+        <span>${title}</span>
+        <div class="dw-chip-row">${renderScenarioBadges({templateLinked: !!refMeta})}</div>
+      </div>
       <span class="dw-badge">${(sc.steps || []).length}</span>
     </div>`;
-  }).join('');
+    if (refMeta) {
+      templateItems.push(item);
+    } else {
+      customItems.push(item);
+    }
+  });
   return `
     <div class="dw-section">
       <div class="dw-scenarios">
@@ -769,7 +980,8 @@ function renderScenariosSection(dev) {
             <button data-action="add-scenario">Add</button>
             <button class="danger" data-action="remove-scenario" data-index="${state.selectedScenario}">Delete</button>
           </div>
-          ${items || "<div class='dw-list-empty'>No scenarios</div>"}
+          ${renderScenarioListGroup('Template scenarios', templateItems.join(''))}
+          ${renderScenarioListGroup('Custom scenarios', customItems.join(''))}
         </div>
         <div class="dw-scenario-detail">
           ${renderScenarioDetail()}
@@ -780,11 +992,55 @@ function renderScenariosSection(dev) {
 
 function renderScenarioDetail() {
   const scen = currentScenario();
+  const dev = currentDevice();
   if (!scen) {
     return "<div class='dw-empty'>Select a scenario to edit.</div>";
   }
+  const scenarioId = toSafeString(scen.id).trim();
+  const refMeta = scenarioId ? collectTemplateScenarioRefs(dev).get(scenarioId) : null;
+  const usage = collectScenarioUsage(dev, scen);
   const steps = (scen.steps || []).map((step, idx) => renderStep(step, idx)).join('');
+  const stepPresetGroups = [
+    {title: 'Messaging', items: [
+      ['mqtt_publish', 'MQTT', 'Publish topic and payload'],
+      ['event', 'Event', 'Send internal bus event'],
+    ]},
+    {title: 'Audio', items: [
+      ['audio_play', 'Audio Play', 'Start track playback'],
+      ['audio_stop', 'Audio Stop', 'Stop current audio'],
+    ]},
+    {title: 'Control', items: [
+      ['set_flag', 'Set Flag', 'Update automation flag'],
+      ['wait_flags', 'Wait Flags', 'Pause until flags match'],
+    ]},
+    {title: 'Logic', items: [
+      ['delay', 'Delay', 'Wait fixed time before next step'],
+      ['loop', 'Loop', 'Jump back to earlier step'],
+    ]},
+  ].map((group) => {
+    const buttons = group.items
+      .map(([type, label, desc]) => `<button class="dw-step-preset-btn" type="button" data-action="add-step" data-step-type="${type}">
+        <span class="dw-step-preset-label">+ ${escapeHtml(label)}</span>
+        <span class="dw-step-preset-desc">${escapeHtml(desc)}</span>
+      </button>`)
+      .join('');
+    return `<div class="dw-step-preset-group">
+      <div class="dw-step-preset-title">${escapeHtml(group.title)}</div>
+      <div class="dw-step-presets">${buttons}</div>
+    </div>`;
+  }).join('');
   return `
+    <div class="dw-field">
+      <label>Scenario type</label>
+      <div class="dw-chip-row">${renderScenarioBadges({templateLinked: !!refMeta})}</div>
+      ${refMeta ? `<div class="dw-hint small">Linked from: ${escapeHtml(refMeta.sources.join(', '))}</div>` : "<div class='dw-hint small'>Custom scenario not referenced by the current template.</div>"}
+    </div>
+    <div class="dw-field">
+      <label>Used by</label>
+      ${usage.length
+        ? `<div class="dw-usage-list">${usage.map((item) => `<div class="dw-usage-item">${escapeHtml(item)}</div>`).join('')}</div>`
+        : "<div class='dw-empty small'>Not referenced</div>"}
+    </div>
     <div class="dw-field">
       <label>Scenario ID</label>
       <input data-scenario-field="id" value="${escapeAttr(scen.id || '')}" placeholder="scenario_id">
@@ -801,19 +1057,101 @@ function renderScenarioDetail() {
       <input data-scenario-field="button_label" value="${escapeAttr(scen.button_label || scen.name || scen.id || '')}" placeholder="Friendly label" ${scen.button_enabled ? '' : 'disabled'}>
     </div>
     <div class="dw-step-footer">
-      <button class="secondary" data-action="add-step">Add step</button>
+      <div class="dw-step-preset-panel">${stepPresetGroups}</div>
       <span class="dw-note">Steps execute sequentially; use loops and waits for advanced flows.</span>
     </div>
     <div>${steps || "<div class='dw-empty'>No steps</div>"}</div>
   `;
 }
 
+function stepTypeLabel(type) {
+  switch (type) {
+    case 'mqtt_publish': return 'Publish MQTT';
+    case 'audio_play': return 'Play audio';
+    case 'audio_stop': return 'Stop audio';
+    case 'set_flag': return 'Set flag';
+    case 'wait_flags': return 'Wait for flags';
+    case 'loop': return 'Loop';
+    case 'delay': return 'Delay';
+    case 'event': return 'Emit event';
+    case 'nop':
+    default:
+      return 'No operation';
+  }
+}
+
+function stepSummary(step) {
+  const type = step?.type || 'nop';
+  switch (type) {
+    case 'mqtt_publish': {
+      const topic = toSafeString(step?.data?.mqtt?.topic).trim();
+      const payload = toSafeString(step?.data?.mqtt?.payload).trim();
+      if (topic && payload) return `${topic} -> ${payload}`;
+      if (topic) return topic;
+      return 'Topic and payload';
+    }
+    case 'audio_play': {
+      const track = toSafeString(step?.data?.audio?.track).trim();
+      return track || 'Track playback';
+    }
+    case 'audio_stop':
+      return 'Stop current audio output';
+    case 'set_flag': {
+      const flag = toSafeString(step?.data?.flag?.flag).trim() || 'flag';
+      const value = step?.data?.flag?.value ? 'true' : 'false';
+      return `${flag} = ${value}`;
+    }
+    case 'wait_flags': {
+      const reqs = Array.isArray(step?.data?.wait_flags?.requirements) ? step.data.wait_flags.requirements : [];
+      const mode = step?.data?.wait_flags?.mode === 'any' ? 'any' : 'all';
+      if (!reqs.length) {
+        return `Wait for ${mode} conditions`;
+      }
+      if (reqs.length === 1) {
+        const req = reqs[0] || {};
+        const flag = toSafeString(req.flag).trim() || 'flag';
+        return `${flag} = ${req.required_state ? 'true' : 'false'}`;
+      }
+      return `Wait for ${mode} of ${reqs.length} flags`;
+    }
+    case 'loop': {
+      const target = parseInt(step?.data?.loop?.target_step, 10);
+      const maxIterations = parseInt(step?.data?.loop?.max_iterations, 10);
+      const targetText = Number.isNaN(target) ? 'previous step' : `step ${target + 1}`;
+      if (!Number.isNaN(maxIterations) && maxIterations > 0) {
+        return `Back to ${targetText}, max ${maxIterations} times`;
+      }
+      return `Back to ${targetText}`;
+    }
+    case 'delay': {
+      const delayMs = parseInt(step?.delay_ms, 10);
+      return `${Number.isNaN(delayMs) ? 0 : delayMs} ms`;
+    }
+    case 'event': {
+      const eventName = toSafeString(step?.data?.event?.event).trim();
+      const topic = toSafeString(step?.data?.event?.topic).trim();
+      if (eventName && topic) return `${eventName} on ${topic}`;
+      if (eventName) return eventName;
+      return 'Internal event';
+    }
+    case 'nop':
+    default:
+      return 'No action';
+  }
+}
+
 function renderStep(step, idx) {
-  const options = ACTION_TYPES.map((type) => `<option value="${type}" ${type === step.type ? 'selected' : ''}>${type}</option>`).join('');
+  const options = ACTION_TYPES.map((type) => `<option value="${type}" ${type === step.type ? 'selected' : ''}>${escapeHtml(stepTypeLabel(type))}</option>`).join('');
+  const title = stepTypeLabel(step.type || 'nop');
+  const summary = stepSummary(step);
   return `
     <div class="dw-step-card">
       <div class="dw-step-head">
-        <h5>Step ${idx + 1}</h5>
+        <div class="dw-step-title-wrap">
+          <h5>${escapeHtml(title)}</h5>
+          <div class="dw-step-summary">${escapeHtml(summary)}</div>
+          <span class="dw-step-index">Step ${idx + 1}</span>
+        </div>
         <div class="dw-step-head-controls">
           <button data-action="step-up" data-index="${idx}">&uarr;</button>
           <button data-action="step-down" data-index="${idx}">&darr;</button>
@@ -847,31 +1185,71 @@ function renderStepFields(step, idx) {
     case 'audio_play':
       ensure(step, ['data','audio']);
       return `
-        <div class="dw-field"><label>Track path</label><input data-step-field="data.audio.track" data-index="${idx}" value="${escapeAttr(step.data.audio.track || '')}" list="track_lookup"></div>
+        ${renderTrackField('Track path', `data-step-field="data.audio.track" data-index="${idx}"`, step.data.audio.track || '', `${TRACK_LOOKUP_ROOT}/track.mp3`)}
         <div class="dw-field"><label>Blocking</label><select data-step-field="data.audio.blocking" data-index="${idx}"><option value="false" ${step.data.audio.blocking?'':'selected'}>No</option><option value="true" ${step.data.audio.blocking?'selected':''}>Yes</option></select></div>`;
     case 'set_flag':
       ensure(step, ['data','flag']);
       return `
-        <div class="dw-field"><label>Flag name</label><input data-step-field="data.flag.flag" data-index="${idx}" value="${escapeAttr(step.data.flag.flag || '')}"></div>
+        <div class="dw-field"><label>Flag name</label><input data-step-field="data.flag.flag" data-index="${idx}" value="${escapeAttr(step.data.flag.flag || '')}" list="flag_lookup"></div>
         <div class="dw-field"><label>Value</label><select data-step-field="data.flag.value" data-index="${idx}"><option value="true" ${step.data.flag.value?'selected':''}>True</option><option value="false" ${step.data.flag.value?'':'selected'}>False</option></select></div>`;
     case 'wait_flags':
       ensure(step, ['data','wait_flags']);
       ensure(step.data.wait_flags, ['requirements']);
+      const waitMode = step.data.wait_flags.mode === 'any' ? 'any' : 'all';
+      const waitModeText = waitMode === 'any' ? 'Wait until any condition matches' : 'Wait until all conditions match';
+      const knownFlags = collectKnownFlags(currentDevice());
+      const knownFlagsHint = knownFlags.length
+        ? `Known flags: ${escapeHtml(knownFlags.join(', '))}`
+        : 'No known flags yet. Add flags in steps or template rules first.';
+      const knownFlagButtons = knownFlags.map((flag) => `
+        <button class="dw-flag-chip-btn" type="button" data-action="wait-add-known-flag" data-step-index="${idx}" data-flag="${escapeAttr(flag)}">
+          + ${escapeHtml(flag)}
+        </button>`).join('');
+      const reqSummary = (step.data.wait_flags.requirements || []).map((req) => {
+        const flag = escapeHtml(req.flag || 'flag');
+        const stateLabel = req.required_state ? 'true' : 'false';
+        return `<span class="dw-wait-chip">${flag} = ${stateLabel}</span>`;
+      }).join('');
       const reqs = (step.data.wait_flags.requirements || []).map((req, rIdx) => `
-        <div class="dw-wait-row">
-          <input placeholder="flag" data-wait-field="flag" data-step-index="${idx}" data-req-index="${rIdx}" value="${escapeAttr(req.flag || '')}">
-          <select data-wait-field="state" data-step-index="${idx}" data-req-index="${rIdx}">
-            <option value="true" ${req.required_state?'selected':''}>True</option>
-            <option value="false" ${req.required_state?'':'selected'}>False</option>
-          </select>
-          <button data-action="remove-wait-rule" data-step-index="${idx}" data-req-index="${rIdx}">&times;</button>
+        <div class="dw-wait-card">
+          <div class="dw-wait-card-head">
+            <span class="dw-wait-card-title">${escapeHtml((req.flag || 'Flag').trim() || 'Flag')} = ${req.required_state ? 'true' : 'false'}</span>
+            <button data-action="remove-wait-rule" data-step-index="${idx}" data-req-index="${rIdx}">&times;</button>
+          </div>
+          <div class="dw-wait-row">
+            <input placeholder="flag name" list="flag_lookup" data-wait-field="flag" data-step-index="${idx}" data-req-index="${rIdx}" value="${escapeAttr(req.flag || '')}">
+            <select data-wait-field="state" data-step-index="${idx}" data-req-index="${rIdx}">
+              <option value="true" ${req.required_state?'selected':''}>true</option>
+              <option value="false" ${req.required_state?'':'selected'}>false</option>
+            </select>
+            <span class="dw-wait-preview">${escapeHtml((req.flag || 'flag').trim() || 'flag')} = ${req.required_state ? 'true' : 'false'}</span>
+          </div>
         </div>`).join('');
       return `
-        <div class="dw-field"><label>Mode</label><select data-step-field="data.wait_flags.mode" data-index="${idx}"><option value="all" ${step.data.wait_flags.mode==='all'?'selected':''}>All</option><option value="any" ${step.data.wait_flags.mode==='any'?'selected':''}>Any</option></select></div>
-        <div class="dw-field"><label>Timeout ms</label><input type="number" data-step-field="data.wait_flags.timeout_ms" data-index="${idx}" value="${step.data.wait_flags.timeout_ms || 0}"></div>
-        <div class="dw-field"><label>Requirements</label>
-          <div class="dw-wait-req">${reqs || "<div class='dw-empty small'>No requirements</div>"}</div>
-          <button class="secondary" data-action="add-wait-rule" data-step-index="${idx}">Add requirement</button>
+        <div class="dw-field">
+          <label>Wait until</label>
+          <div class="dw-wait-panel">
+            <div class="dw-wait-panel-head">
+              <div class="dw-wait-headline">${waitModeText}</div>
+              <div class="dw-wait-summary">${reqSummary || "<span class='dw-empty small'>No requirements yet</span>"}</div>
+            </div>
+            <div class="dw-wait-settings">
+              <div class="dw-field"><label>Mode</label><select data-step-field="data.wait_flags.mode" data-index="${idx}">
+                <option value="all" ${waitMode==='all'?'selected':''}>All conditions</option>
+                <option value="any" ${waitMode==='any'?'selected':''}>Any condition</option>
+              </select></div>
+              <div class="dw-field"><label>Timeout ms</label><input type="number" data-step-field="data.wait_flags.timeout_ms" data-index="${idx}" value="${step.data.wait_flags.timeout_ms || 0}"></div>
+            </div>
+            <div class="dw-hint small">${knownFlagsHint}</div>
+            ${knownFlagButtons ? `<div class="dw-known-flags">
+              <div class="dw-known-flags-title">Use existing flags</div>
+              <div class="dw-known-flags-list">${knownFlagButtons}</div>
+            </div>` : ''}
+            <div class="dw-field"><label>Requirements</label>
+              <div class="dw-wait-req">${reqs || "<div class='dw-empty small'>No requirements</div>"}</div>
+              <button class="secondary" data-action="add-wait-rule" data-step-index="${idx}">Add requirement</button>
+            </div>
+          </div>
         </div>`;
     case 'loop':
       ensure(step, ['data','loop']);
@@ -915,21 +1293,10 @@ function refreshTrackPickers() {
   if (!state.detail) {
     return;
   }
-  const inputs = state.detail.querySelectorAll('input[list="track_lookup"]');
+  const inputs = state.detail.querySelectorAll('.dw-track-field input');
   if (inputs.length) {
     ensureTrackLookupOptions();
   }
-  inputs.forEach((input) => {
-    if (input.dataset.pickerBound) {
-      return;
-    }
-    input.dataset.pickerBound = '1';
-    input.addEventListener('focus', () => {
-      if (typeof input.showPicker === 'function') {
-        input.showPicker();
-      }
-    });
-  });
 }
 
 const TRACK_LOOKUP_ROOT = (typeof AUDIO_ROOT === 'string' && AUDIO_ROOT) ? AUDIO_ROOT : '/sdcard';
@@ -961,6 +1328,162 @@ function ensureTrackLookupOptions(forceReload) {
     trackLookupPromise = null;
   });
   return trackLookupPromise;
+}
+
+function openTrackPicker(targetInput) {
+  if (!targetInput || !state.trackPickerModal || !state.trackPickerContent) {
+    return;
+  }
+  state.trackPicker.targetInput = targetInput;
+  state.trackPicker.query = '';
+  state.trackPicker.open = true;
+  ensureTrackLookupOptions().finally(() => {
+    renderTrackPicker();
+    state.trackPickerModal.classList.remove('hidden');
+    const search = state.trackPickerContent.querySelector('input[data-track-picker-field="query"]');
+    if (search) {
+      search.focus();
+    }
+  });
+}
+
+function closeTrackPicker() {
+  state.trackPicker.open = false;
+  state.trackPicker.query = '';
+  state.trackPicker.targetInput = null;
+  if (state.trackPickerModal) {
+    state.trackPickerModal.classList.add('hidden');
+  }
+  if (state.trackPickerContent) {
+    state.trackPickerContent.innerHTML = '';
+  }
+}
+
+function getTrackPickerResults() {
+  const query = toSafeString(state.trackPicker.query).trim().toLowerCase();
+  const tracks = Array.isArray(trackLookupCache) ? trackLookupCache : [];
+  if (!query) {
+    return tracks;
+  }
+  return tracks.filter((entry) => {
+    const path = toSafeString(entry?.path).toLowerCase();
+    const name = trackBaseName(entry?.path).toLowerCase();
+    const dir = trackDirName(entry?.path).toLowerCase();
+    return path.includes(query) || name.includes(query) || dir.includes(query);
+  });
+}
+
+function renderTrackPicker() {
+  if (!state.trackPickerContent) {
+    return;
+  }
+  const targetValue = toSafeString(state.trackPicker.targetInput?.value).trim();
+  const results = getTrackPickerResults();
+  const grouped = new Map();
+  results.forEach((entry) => {
+    const dir = trackDirName(entry?.path) || '/';
+    if (!grouped.has(dir)) {
+      grouped.set(dir, []);
+    }
+    grouped.get(dir).push(entry);
+  });
+  const groupsHtml = Array.from(grouped.entries()).map(([dir, entries]) => {
+    const items = entries.map((entry) => {
+      const path = toSafeString(entry?.path);
+      const active = path === targetValue ? ' active' : '';
+      return `<button type="button" class="dw-track-picker-item${active}" data-track-pick="${escapeAttr(path)}">
+        <span class="dw-track-picker-name">${escapeHtml(trackBaseName(path) || path)}</span>
+        <span class="dw-track-picker-path">${escapeHtml(path)}</span>
+      </button>`;
+    }).join('');
+    return `<div class="dw-track-picker-group">
+      <div class="dw-track-picker-group-title">${escapeHtml(dir)}</div>
+      <div class="dw-track-picker-items">${items}</div>
+    </div>`;
+  }).join('');
+
+  state.trackPickerContent.innerHTML = `
+    <div class="dw-track-picker">
+      <div class="dw-track-picker-head">
+        <h3>Choose audio track</h3>
+        <button type="button" class="secondary small" data-action="track-picker-close">Close</button>
+      </div>
+      <div class="dw-field">
+        <label>Search</label>
+        <input data-track-picker-field="query" value="${escapeAttr(state.trackPicker.query || '')}" placeholder="Search by file or folder">
+      </div>
+      <div class="dw-track-picker-current">
+        <span class="dw-track-picker-current-label">Current</span>
+        <span class="dw-track-picker-current-value">${escapeHtml(targetValue || 'No track selected')}</span>
+      </div>
+      <div class="dw-track-picker-results">
+        ${groupsHtml || "<div class='dw-empty'>No tracks found</div>"}
+      </div>
+    </div>`;
+}
+
+function applyTrackPickerValue(value) {
+  const input = state.trackPicker.targetInput;
+  if (!input) {
+    closeTrackPicker();
+    return;
+  }
+  input.value = toSafeString(value);
+  if (input.dataset.stepField) {
+    updateStepField(input.dataset.index, input.dataset.stepField, input);
+  } else if (input.dataset.templateField) {
+    updateTemplateField(input);
+  }
+  renderDeviceDetail();
+  markDirty();
+  closeTrackPicker();
+}
+
+function clearTrackField(input) {
+  if (!input) return;
+  input.value = '';
+  if (input.dataset.stepField) {
+    updateStepField(input.dataset.index, input.dataset.stepField, input);
+  } else if (input.dataset.templateField) {
+    updateTemplateField(input);
+  }
+  renderDeviceDetail();
+  markDirty();
+}
+
+function handleTrackPickerClick(ev) {
+  if (ev.target === state.trackPickerModal) {
+    closeTrackPicker();
+    return;
+  }
+  const btn = ev.target.closest('[data-action], [data-track-pick]');
+  if (!btn) {
+    return;
+  }
+  if (btn.dataset.trackPick !== undefined) {
+    applyTrackPickerValue(btn.dataset.trackPick);
+    return;
+  }
+  if (btn.dataset.action === 'track-picker-close') {
+    closeTrackPicker();
+  }
+}
+
+function handleTrackPickerInput(ev) {
+  const el = ev.target;
+  if (!el || el.dataset.trackPickerField !== 'query') {
+    return;
+  }
+  const caret = typeof el.selectionStart === 'number' ? el.selectionStart : null;
+  state.trackPicker.query = el.value || '';
+  renderTrackPicker();
+  const nextInput = state.trackPickerContent?.querySelector('input[data-track-picker-field="query"]');
+  if (nextInput) {
+    nextInput.focus();
+    if (caret !== null) {
+      nextInput.setSelectionRange(caret, caret);
+    }
+  }
 }
 
 async function collectTrackLookupEntries(root) {
@@ -1035,21 +1558,8 @@ function updateDeviceField(field, value) {
   const dev = currentDevice();
   if (!dev) return;
   dev[field] = value;
-  if (field === 'display_name') {
-    dev.name = value;
-  } else if (field === 'name' && !dev.display_name) {
-    dev.display_name = value;
-  }
   markDirty();
   refreshRequiredIndicators();
-}
-
-function updateTopicField(indexStr, field, value) {
-  const idx = parseInt(indexStr, 10);
-  const dev = currentDevice();
-  if (!dev || isNaN(idx) || !dev.topics || !dev.topics[idx]) return;
-  dev.topics[idx][field] = value;
-  markDirty();
 }
 
 function updateTemplateField(el) {
@@ -1115,6 +1625,8 @@ function updateTemplateField(el) {
       const sub = el.dataset.subfield;
       if (sub === 'payload_required') {
         tpl.rules[idx].payload_required = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else if (sub === 'scenario') {
+        if (!setTemplateScenarioReference(dev, 'mqtt-rule', sub, el.dataset.index, el.value)) return;
       } else {
         tpl.rules[idx][sub] = el.value;
       }
@@ -1129,6 +1641,8 @@ function updateTemplateField(el) {
       const sub = el.dataset.subfield;
       if (sub === 'state') {
         tpl.rules[idx].required_state = el.value === 'true';
+      } else if (sub === 'scenario') {
+        if (!setTemplateScenarioReference(dev, 'flag-rule', sub, el.dataset.index, el.value)) return;
       } else {
         tpl.rules[idx][sub] = el.value;
       }
@@ -1142,13 +1656,7 @@ function updateTemplateField(el) {
     }
     case 'condition-scenario': {
       ensureConditionTemplate(dev);
-      if (!dev.template?.condition) return;
-      const sub = el.dataset.subfield;
-      if (sub === 'true') {
-        dev.template.condition.true_scenario = el.value;
-      } else if (sub === 'false') {
-        dev.template.condition.false_scenario = el.value;
-      }
+      if (!setTemplateScenarioReference(dev, 'condition-scenario', el.dataset.subfield, '', el.value)) return;
       break;
     }
     case 'condition-rule': {
@@ -1175,7 +1683,7 @@ function updateTemplateField(el) {
         dev.template.interval.interval_ms = next;
         el.value = next;
       } else if (sub === 'scenario') {
-        dev.template.interval.scenario = el.value;
+        if (!setTemplateScenarioReference(dev, 'interval', sub, '', el.value)) return;
       }
       break;
     }
@@ -1205,6 +1713,8 @@ function updateTemplateField(el) {
         el.value = next;
       } else if (sub === 'reset_on_error') {
         tpl.reset_on_error = el.type === 'checkbox' ? el.checked : el.value === 'true';
+      } else if (sub === 'success_scenario' || sub === 'fail_scenario') {
+        if (!setTemplateScenarioReference(dev, 'sequence', sub, '', el.value)) return;
       } else {
         tpl[sub] = el.value;
       }
@@ -1217,10 +1727,74 @@ function updateTemplateField(el) {
   refreshRequiredIndicators();
 }
 
+function setTemplateScenarioReference(dev, field, subfield, indexStr, value) {
+  if (!dev) return false;
+  const nextValue = toSafeString(value);
+  switch (field) {
+    case 'mqtt-rule': {
+      ensureMqttTemplate(dev);
+      const tpl = dev.template?.mqtt;
+      const idx = parseInt(indexStr, 10);
+      if (!tpl || Number.isNaN(idx) || !tpl.rules[idx] || subfield !== 'scenario') return false;
+      tpl.rules[idx].scenario = nextValue;
+      return true;
+    }
+    case 'flag-rule': {
+      ensureFlagTemplate(dev);
+      const tpl = dev.template?.flag;
+      const idx = parseInt(indexStr, 10);
+      if (!tpl || Number.isNaN(idx) || !tpl.rules[idx] || subfield !== 'scenario') return false;
+      tpl.rules[idx].scenario = nextValue;
+      return true;
+    }
+    case 'condition-scenario': {
+      ensureConditionTemplate(dev);
+      if (!dev.template?.condition) return false;
+      if (subfield === 'true') {
+        dev.template.condition.true_scenario = nextValue;
+        return true;
+      }
+      if (subfield === 'false') {
+        dev.template.condition.false_scenario = nextValue;
+        return true;
+      }
+      return false;
+    }
+    case 'interval': {
+      ensureIntervalTemplate(dev);
+      if (!dev.template?.interval || subfield !== 'scenario') return false;
+      dev.template.interval.scenario = nextValue;
+      return true;
+    }
+    case 'sequence': {
+      ensureSequenceTemplate(dev);
+      const tpl = dev.template?.sequence;
+      if (!tpl) return false;
+      if (subfield === 'success_scenario' || subfield === 'fail_scenario') {
+        tpl[subfield] = nextValue;
+        return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 function updateScenarioField(field, el) {
   const scen = currentScenario();
   if (!scen || !el) return;
   switch (field) {
+    case 'id': {
+      const dev = currentDevice();
+      const prevId = toSafeString(scen.id);
+      const nextId = toSafeString(el.value);
+      scen.id = nextId;
+      if (dev && prevId !== nextId) {
+        updateScenarioReferencesForRename(dev, prevId, nextId);
+      }
+      break;
+    }
     case 'button_enabled': {
       scen.button_enabled = el.type === 'checkbox' ? el.checked : el.value === 'true';
       if (!scen.button_enabled) {
@@ -1237,6 +1811,42 @@ function updateScenarioField(field, el) {
       break;
   }
   markDirty();
+}
+
+function replaceScenarioRefValue(container, key, prevId, nextId) {
+  if (!container || !key) {
+    return;
+  }
+  if (toSafeString(container[key]) === prevId) {
+    container[key] = nextId;
+  }
+}
+
+function updateScenarioReferencesForRename(dev, prevId, nextId) {
+  if (!dev || !prevId || prevId === nextId || !dev.template) {
+    return;
+  }
+  switch (dev.template.type) {
+    case 'on_mqtt_event':
+      (dev.template.mqtt?.rules || []).forEach((rule) => replaceScenarioRefValue(rule, 'scenario', prevId, nextId));
+      break;
+    case 'on_flag':
+      (dev.template.flag?.rules || []).forEach((rule) => replaceScenarioRefValue(rule, 'scenario', prevId, nextId));
+      break;
+    case 'if_condition':
+      replaceScenarioRefValue(dev.template.condition, 'true_scenario', prevId, nextId);
+      replaceScenarioRefValue(dev.template.condition, 'false_scenario', prevId, nextId);
+      break;
+    case 'interval_task':
+      replaceScenarioRefValue(dev.template.interval, 'scenario', prevId, nextId);
+      break;
+    case 'sequence_lock':
+      replaceScenarioRefValue(dev.template.sequence, 'success_scenario', prevId, nextId);
+      replaceScenarioRefValue(dev.template.sequence, 'fail_scenario', prevId, nextId);
+      break;
+    default:
+      break;
+  }
 }
 
 function updateStepField(indexStr, field, el) {
@@ -1777,6 +2387,28 @@ function removeWaitRule(stepIdxStr, reqIdxStr) {
   markDirty();
 }
 
+function addKnownWaitFlag(stepIdxStr, flagName) {
+  const stepIdx = parseInt(stepIdxStr, 10);
+  const scen = currentScenario();
+  const flag = toSafeString(flagName).trim();
+  if (!scen || isNaN(stepIdx) || !flag) return;
+  const step = scen.steps?.[stepIdx];
+  if (!step) return;
+  ensure(step, ['data', 'wait_flags', 'requirements']);
+  const reqs = step.data.wait_flags.requirements;
+  const emptyReq = Array.isArray(reqs) ? reqs.find((req) => req && !toSafeString(req.flag).trim()) : null;
+  if (emptyReq) {
+    emptyReq.flag = flag;
+    if (emptyReq.required_state === undefined) {
+      emptyReq.required_state = true;
+    }
+  } else {
+    reqs.push({flag, required_state: true});
+  }
+  renderDeviceDetail();
+  markDirty();
+}
+
 function normalizeValue(value, type) {
   if (type === 'number') {
     const num = parseInt(value, 10);
@@ -1801,8 +2433,11 @@ function normalizeDevice(dev) {
   if (!dev.display_name) {
     dev.display_name = dev.name || dev.id || '';
   }
-  if (!dev.name && dev.display_name) {
-    dev.name = dev.display_name;
+  if (Object.prototype.hasOwnProperty.call(dev, 'name')) {
+    delete dev.name;
+  }
+  if (Object.prototype.hasOwnProperty.call(dev, 'topics')) {
+    delete dev.topics;
   }
   if (!Array.isArray(dev.scenarios)) {
     dev.scenarios = [];
@@ -1892,14 +2527,19 @@ function prepareConfigForSave(model) {
   }
   snapshot.devices.forEach((dev, devIdx) => {
     if (!dev || typeof dev !== 'object') return;
+    const displayName = toSafeString(dev.display_name || dev.id || 'Device');
     if (!Array.isArray(dev.scenarios)) {
       snapshot.devices[devIdx].scenarios = [];
-      return;
+    } else {
+      snapshot.devices[devIdx].scenarios = dev.scenarios.map(serializeScenarioForSave);
     }
-    snapshot.devices[devIdx].scenarios = dev.scenarios.map(serializeScenarioForSave);
-    const displayName = toSafeString(dev.display_name || dev.name || dev.id || 'Device');
     snapshot.devices[devIdx].display_name = displayName;
-    snapshot.devices[devIdx].name = displayName;
+    if (Object.prototype.hasOwnProperty.call(snapshot.devices[devIdx], 'name')) {
+      delete snapshot.devices[devIdx].name;
+    }
+    if (Object.prototype.hasOwnProperty.call(snapshot.devices[devIdx], 'topics')) {
+      delete snapshot.devices[devIdx].topics;
+    }
     stripTemplateRuntimeFields(snapshot.devices[devIdx]);
     if (snapshot.devices[devIdx].tabs) {
       delete snapshot.devices[devIdx].tabs;
@@ -1909,6 +2549,170 @@ function prepareConfigForSave(model) {
     delete snapshot.tab_limit;
   }
   return snapshot;
+}
+
+function makeValidationIssue(level, message, meta) {
+  return Object.assign({level, message}, meta || {});
+}
+
+function pushValidationIssue(bucket, level, message, meta) {
+  bucket.push(makeValidationIssue(level, message, meta));
+}
+
+function validateScenarioReference(issues, dev, devIdx, scenarioIds, value, label, meta) {
+  const scenarioId = toSafeString(value).trim();
+  if (!scenarioId) {
+    pushValidationIssue(issues.warnings, 'warning', `${label} is empty`, Object.assign({deviceIndex: devIdx}, meta || {}));
+    return;
+  }
+  if (!scenarioIds.has(scenarioId)) {
+    pushValidationIssue(
+      issues.errors,
+      'error',
+      `${label} points to missing scenario "${scenarioId}"`,
+      Object.assign({deviceIndex: devIdx}, meta || {})
+    );
+  }
+}
+
+function collectValidationIssues(model) {
+  const issues = {errors: [], warnings: []};
+  const devices = Array.isArray(model?.devices) ? model.devices : [];
+  const deviceIdOwners = new Map();
+
+  devices.forEach((dev, devIdx) => {
+    const deviceId = toSafeString(dev?.id).trim();
+    if (!deviceId) {
+      pushValidationIssue(issues.errors, 'error', 'Device ID is required', {deviceIndex: devIdx});
+    } else {
+      if (!deviceIdOwners.has(deviceId)) {
+        deviceIdOwners.set(deviceId, []);
+      }
+      deviceIdOwners.get(deviceId).push(devIdx);
+    }
+
+    const scenarios = Array.isArray(dev?.scenarios) ? dev.scenarios : [];
+    const scenarioIdOwners = new Map();
+    scenarios.forEach((scen, scenIdx) => {
+      const scenarioId = toSafeString(scen?.id).trim();
+      if (!scenarioId) {
+        pushValidationIssue(issues.errors, 'error', 'Scenario ID is required', {deviceIndex: devIdx, scenarioIndex: scenIdx});
+      } else {
+        if (!scenarioIdOwners.has(scenarioId)) {
+          scenarioIdOwners.set(scenarioId, []);
+        }
+        scenarioIdOwners.get(scenarioId).push(scenIdx);
+      }
+    });
+
+    scenarioIdOwners.forEach((owners, scenarioId) => {
+      if (owners.length > 1) {
+        owners.forEach((scenIdx) => {
+          pushValidationIssue(
+            issues.errors,
+            'error',
+            `Scenario ID "${scenarioId}" is duplicated inside this device`,
+            {deviceIndex: devIdx, scenarioIndex: scenIdx}
+          );
+        });
+      }
+    });
+
+    const scenarioIds = new Set(Array.from(scenarioIdOwners.keys()));
+    const tplType = dev?.template?.type || '';
+    if (tplType === 'on_mqtt_event') {
+      const rules = Array.isArray(dev?.template?.mqtt?.rules) ? dev.template.mqtt.rules : [];
+      rules.forEach((rule, idx) => {
+        validateScenarioReference(issues, dev, devIdx, scenarioIds, rule?.scenario, `MQTT trigger ${idx + 1} scenario`, {templateField: 'mqtt-rule', templateIndex: idx});
+      });
+    } else if (tplType === 'on_flag') {
+      const rules = Array.isArray(dev?.template?.flag?.rules) ? dev.template.flag.rules : [];
+      rules.forEach((rule, idx) => {
+        validateScenarioReference(issues, dev, devIdx, scenarioIds, rule?.scenario, `Flag trigger ${idx + 1} scenario`, {templateField: 'flag-rule', templateIndex: idx});
+      });
+    } else if (tplType === 'if_condition') {
+      const condition = dev?.template?.condition || {};
+      validateScenarioReference(issues, dev, devIdx, scenarioIds, condition.true_scenario, 'Condition TRUE branch scenario', {templateField: 'condition-scenario'});
+      validateScenarioReference(issues, dev, devIdx, scenarioIds, condition.false_scenario, 'Condition FALSE branch scenario', {templateField: 'condition-scenario'});
+    } else if (tplType === 'interval_task') {
+      const interval = dev?.template?.interval || {};
+      validateScenarioReference(issues, dev, devIdx, scenarioIds, interval.scenario, 'Interval action scenario', {templateField: 'interval'});
+    } else if (tplType === 'sequence_lock') {
+      const sequence = dev?.template?.sequence || {};
+      validateScenarioReference(issues, dev, devIdx, scenarioIds, sequence.success_scenario, 'Sequence success scenario', {templateField: 'sequence'});
+      validateScenarioReference(issues, dev, devIdx, scenarioIds, sequence.fail_scenario, 'Sequence failure scenario', {templateField: 'sequence'});
+    }
+
+    scenarios.forEach((scen, scenIdx) => {
+      const steps = Array.isArray(scen?.steps) ? scen.steps : [];
+      steps.forEach((step, stepIdx) => {
+        const type = toSafeString(step?.type).trim() || 'nop';
+        const stepLabel = stepTypeLabel(type);
+        switch (type) {
+          case 'mqtt_publish': {
+            const topic = toSafeString(step?.data?.mqtt?.topic || step?.topic).trim();
+            if (!topic) {
+              pushValidationIssue(issues.errors, 'error', `${stepLabel} step requires topic`, {deviceIndex: devIdx, scenarioIndex: scenIdx, stepIndex: stepIdx});
+            }
+            break;
+          }
+          case 'audio_play': {
+            const track = toSafeString(step?.data?.audio?.track || step?.track).trim();
+            if (!track) {
+              pushValidationIssue(issues.errors, 'error', `${stepLabel} step requires track`, {deviceIndex: devIdx, scenarioIndex: scenIdx, stepIndex: stepIdx});
+            }
+            break;
+          }
+          case 'set_flag': {
+            const flag = toSafeString(step?.data?.flag?.flag || step?.flag).trim();
+            if (!flag) {
+              pushValidationIssue(issues.errors, 'error', `${stepLabel} step requires flag name`, {deviceIndex: devIdx, scenarioIndex: scenIdx, stepIndex: stepIdx});
+            }
+            break;
+          }
+          case 'event': {
+            const eventName = toSafeString(step?.data?.event?.event || step?.event).trim();
+            if (!eventName) {
+              pushValidationIssue(issues.errors, 'error', `${stepLabel} step requires event name`, {deviceIndex: devIdx, scenarioIndex: scenIdx, stepIndex: stepIdx});
+            }
+            break;
+          }
+          case 'wait_flags': {
+            const reqs = Array.isArray(step?.data?.wait_flags?.requirements) ? step.data.wait_flags.requirements : [];
+            if (!reqs.length) {
+              pushValidationIssue(issues.errors, 'error', `${stepLabel} step requires at least one requirement`, {deviceIndex: devIdx, scenarioIndex: scenIdx, stepIndex: stepIdx});
+            }
+            reqs.forEach((req, reqIdx) => {
+              const flag = toSafeString(req?.flag).trim();
+              if (!flag) {
+                pushValidationIssue(issues.errors, 'error', `${stepLabel} requirement ${reqIdx + 1} requires flag name`, {deviceIndex: devIdx, scenarioIndex: scenIdx, stepIndex: stepIdx});
+              }
+            });
+            break;
+          }
+          case 'loop': {
+            const targetStep = toInt(step?.data?.loop?.target_step);
+            if (targetStep < 0 || targetStep >= steps.length) {
+              pushValidationIssue(issues.errors, 'error', `${stepLabel} step target step ${targetStep} is out of range`, {deviceIndex: devIdx, scenarioIndex: scenIdx, stepIndex: stepIdx});
+            }
+            break;
+          }
+          default:
+            break;
+        }
+      });
+    });
+  });
+
+  deviceIdOwners.forEach((owners, deviceId) => {
+    if (owners.length > 1) {
+      owners.forEach((devIdx) => {
+        pushValidationIssue(issues.errors, 'error', `Device ID "${deviceId}" is duplicated`, {deviceIndex: devIdx});
+      });
+    }
+  });
+
+  return issues;
 }
 
 function serializeScenarioForSave(scen) {
@@ -2023,9 +2827,7 @@ function addDevice() {
   ensureModel();
   state.model.devices.push({
     id: `device_${Date.now().toString(16)}`,
-    name: 'New device',
     display_name: 'New device',
-    topics: [],
     scenarios: [],
   });
   state.selectedDevice = state.model.devices.length - 1;
@@ -2040,7 +2842,10 @@ function cloneDevice() {
   ensureModel();
   const copy = JSON.parse(JSON.stringify(dev));
   copy.id = (dev.id || 'device') + '_copy';
-  copy.display_name = (dev.display_name || dev.name || dev.id || 'Device') + ' copy';
+  copy.display_name = (dev.display_name || dev.id || 'Device') + ' copy';
+  if (Object.prototype.hasOwnProperty.call(copy, 'name')) {
+    delete copy.name;
+  }
   state.model.devices.splice(state.selectedDevice + 1, 0, copy);
   state.selectedDevice += 1;
   state.selectedScenario = -1;
@@ -2063,30 +2868,28 @@ function deleteDevice() {
   renderAll();
 }
 
-function addTopic() {
-  const dev = currentDevice();
-  if (!dev) return;
-  dev.topics = dev.topics || [];
-  dev.topics.push({name: 'topic', topic: ''});
-  markDirty();
-  renderDeviceDetail();
-}
-
-function removeTopic(indexStr) {
-  const idx = parseInt(indexStr, 10);
-  const dev = currentDevice();
-  if (!dev || isNaN(idx) || !dev.topics) return;
-  dev.topics.splice(idx, 1);
-  markDirty();
-  renderDeviceDetail();
-}
-
 function addScenario() {
   const dev = currentDevice();
   if (!dev) return;
   dev.scenarios = dev.scenarios || [];
   dev.scenarios.push({id: `scenario_${Date.now().toString(16)}`, name: 'Scenario', steps: []});
   state.selectedScenario = dev.scenarios.length - 1;
+  markDirty();
+  renderDeviceDetail();
+}
+
+function addScenarioForReference(field, subfield, indexStr) {
+  const dev = currentDevice();
+  if (!dev) return;
+  dev.scenarios = dev.scenarios || [];
+  const scenario = {
+    id: `scenario_${Date.now().toString(16)}`,
+    name: 'Scenario',
+    steps: [],
+  };
+  dev.scenarios.push(scenario);
+  state.selectedScenario = dev.scenarios.length - 1;
+  setTemplateScenarioReference(dev, field, subfield, indexStr, scenario.id);
   markDirty();
   renderDeviceDetail();
 }
@@ -2110,11 +2913,14 @@ function selectScenario(indexStr) {
   renderDeviceDetail();
 }
 
-function addStep() {
+function addStep(type) {
   const scen = currentScenario();
   if (!scen) return;
   scen.steps = scen.steps || [];
-  scen.steps.push({type: 'mqtt_publish', delay_ms: 0, data: {mqtt: {topic: '', payload: '', qos: 0, retain: false}}});
+  const stepType = ACTION_TYPES.includes(type) ? type : 'mqtt_publish';
+  const step = {type: stepType, delay_ms: 0, data: {}};
+  normalizeStepForEditing(step);
+  scen.steps.push(step);
   markDirty();
   renderDeviceDetail();
 }
@@ -2140,6 +2946,57 @@ function moveStep(indexStr, delta) {
   renderDeviceDetail();
 }
 
+function updateValidationState() {
+  state.validation = collectValidationIssues(state.model);
+  return state.validation;
+}
+
+function formatValidationIssue(issue) {
+  if (!issue) return '';
+  const parts = [];
+  if (typeof issue.deviceIndex === 'number' && issue.deviceIndex >= 0) {
+    const dev = state.model?.devices?.[issue.deviceIndex];
+    const devName = toSafeString(dev?.display_name || dev?.id).trim() || `Device ${issue.deviceIndex + 1}`;
+    parts.push(devName);
+  }
+  if (typeof issue.scenarioIndex === 'number' && issue.scenarioIndex >= 0 && typeof issue.deviceIndex === 'number' && issue.deviceIndex >= 0) {
+    const scen = state.model?.devices?.[issue.deviceIndex]?.scenarios?.[issue.scenarioIndex];
+    const scenarioName = toSafeString(scen?.name || scen?.id).trim() || `Scenario ${issue.scenarioIndex + 1}`;
+    parts.push(scenarioName);
+  }
+  if (typeof issue.stepIndex === 'number' && issue.stepIndex >= 0) {
+    parts.push(`Step ${issue.stepIndex + 1}`);
+  }
+  const prefix = parts.length ? `${parts.join(' / ')}: ` : '';
+  return prefix + issue.message;
+}
+
+function renderValidationOverview() {
+  if (!state.validationEl) return;
+  const validation = state.validation || {errors: [], warnings: []};
+  const errors = validation.errors || [];
+  const warnings = validation.warnings || [];
+  const total = errors.length + warnings.length;
+  if (!total) {
+    state.validationEl.classList.add('hidden');
+    state.validationEl.innerHTML = '';
+    return;
+  }
+  const items = []
+    .concat(errors.map((issue) => `<li class="dw-validation-item error">${escapeHtml(formatValidationIssue(issue))}</li>`))
+    .concat(warnings.map((issue) => `<li class="dw-validation-item warning">${escapeHtml(formatValidationIssue(issue))}</li>`));
+  state.validationEl.classList.remove('hidden');
+  state.validationEl.innerHTML = `
+    <div class="dw-validation-head">
+      <span class="dw-validation-title">Preflight validation</span>
+      <span class="dw-validation-badges">
+        <span class="dw-validation-badge error">${errors.length} errors</span>
+        <span class="dw-validation-badge warning">${warnings.length} warnings</span>
+      </span>
+    </div>
+    <ul class="dw-validation-list">${items.join('')}</ul>`;
+}
+
 function renderJson() {
   if (!state.json) return;
   if (!state.model) {
@@ -2154,7 +3011,11 @@ function renderJson() {
 
 function updateToolbar() {
   const saveBtn = state.toolbar?.querySelector('[data-action="save"]');
-  if (saveBtn) saveBtn.disabled = !state.dirty || state.busy;
+  const errorCount = (state.validation?.errors || []).length;
+  if (saveBtn) {
+    saveBtn.disabled = !state.dirty || state.busy || errorCount > 0;
+    saveBtn.title = errorCount > 0 ? `Fix ${errorCount} validation errors before saving` : '';
+  }
   const cloneBtn = state.toolbar?.querySelector('[data-action="clone-device"]');
   if (cloneBtn) cloneBtn.disabled = state.selectedDevice < 0;
   const deleteBtn = state.toolbar?.querySelector('[data-action="delete-device"]');
@@ -2164,6 +3025,7 @@ function updateToolbar() {
 function updateGlobals() {
   const schema = document.getElementById('dw_schema');
   if (schema && state.model) schema.value = state.model.schema ?? state.model.schema_version ?? 1;
+  window.__devicesWizardRenderActions = renderActions;
 }
 
 function toSafeString(value) {
@@ -2210,23 +3072,93 @@ function renderProfiles() {
 
 function renderActions() {
   if (!state.actionsRoot) return;
+  const signalMonitorList = Array.isArray(window.__BROKER_STATUS?.signal_monitor) ? window.__BROKER_STATUS.signal_monitor : [];
+  const signalMonitorMap = new Map(signalMonitorList
+    .filter((item) => item && item.id)
+    .map((item) => [item.id, item]));
+  const sequenceMonitorList = Array.isArray(window.__BROKER_STATUS?.sequence_monitor) ? window.__BROKER_STATUS.sequence_monitor : [];
+  const sequenceMonitorMap = new Map(sequenceMonitorList
+    .filter((item) => item && item.id)
+    .map((item) => [item.id, item]));
   const devices = state.model?.devices || [];
   const groups = devices.map((dev) => {
     const scenarios = (dev.scenarios || []).filter(sc => sc && sc.button_enabled && sc.id);
-    if (!scenarios.length || !dev.id) {
+    const signalState = signalMonitorMap.get(dev.id);
+    const sequenceState = sequenceMonitorMap.get(dev.id);
+    if ((!scenarios.length && !signalState && !sequenceState) || !dev.id) {
       return '';
     }
-    const title = escapeHtml(dev.display_name || dev.name || dev.id);
+    const title = escapeHtml(dev.display_name || dev.id);
     const buttons = scenarios.map((sc) => {
       const label = escapeHtml(sc.button_label || sc.name || sc.id);
       return `<button class="dw-action-btn" data-run-device="${escapeAttr(dev.id)}" data-run-scenario="${escapeAttr(sc.id)}">${label}</button>`;
     }).join('');
+    const signalBlock = signalState ? renderActionSignalState(signalState) : '';
+    const sequenceBlock = sequenceState ? renderActionSequenceState(sequenceState) : '';
     return `<div class="dw-action-group">
       <div class="dw-action-title">${title}</div>
-      <div class="dw-action-buttons">${buttons}</div>
+      ${buttons ? `<div class="dw-action-buttons">${buttons}</div>` : ''}
+      ${signalBlock}
+      ${sequenceBlock}
     </div>`;
   }).filter(Boolean).join('');
-  state.actionsRoot.innerHTML = groups || "<div class='dw-empty'>No action buttons configured.</div>";
+  state.actionsRoot.innerHTML = groups || "<div class='dw-empty'>No action buttons or live device widgets configured.</div>";
+}
+
+function renderActionSignalState(dev) {
+  const stateLabel = escapeHtml(dev.state || 'idle');
+  const progressMs = Number(dev.progress_ms || 0);
+  const requiredMs = Number(dev.required_hold_ms || 0);
+  const progress = `${progressMs} / ${requiredMs} ms`;
+  const progressPct = requiredMs > 0 ? Math.max(0, Math.min(100, Math.round((progressMs / requiredMs) * 100))) : 0;
+  const heartbeatTopic = dev.heartbeat_topic ? escapeHtml(dev.heartbeat_topic) : '&mdash;';
+  const timeout = dev.heartbeat_timeout_ms ? `${dev.time_left_ms || 0} ms to timeout` : 'No timeout';
+  const resetTopic = dev.reset_topic ? escapeHtml(dev.reset_topic) : '&mdash;';
+  const stateKey = escapeAttr(dev.state || 'idle');
+  const deviceId = escapeAttr(dev.id || dev.device_id || '');
+  return `<div class="signal-device" data-signal-state="${stateKey}">
+    <div class="signal-meta">
+      <span class="signal-pill">Signal: ${stateLabel}</span>
+      <span class="signal-pill">Progress: ${progress}</span>
+      <span class="signal-pill">${timeout}</span>
+      <button class="secondary small signal-reset-btn" data-signal-reset-device="${deviceId}">Reset</button>
+    </div>
+    <div class="signal-progress"><div class="signal-progress-bar" style="width:${progressPct}%"></div></div>
+    <div class="signal-details">
+      <div class="signal-detail signal-expected"><span class="label">Heartbeat topic</span><strong>${heartbeatTopic}</strong></div>
+      <div class="signal-detail"><span class="label">Reset topic</span><strong>${resetTopic}</strong></div>
+      <div class="signal-detail"><span class="label">Required hold</span><strong>${requiredMs} ms</strong></div>
+    </div>
+  </div>`;
+}
+
+function renderActionSequenceState(dev) {
+  const stateLabel = escapeHtml(dev.state || 'idle');
+  const completed = Number(dev.completed_steps || 0);
+  const total = Number(dev.total_steps || 0);
+  const progress = `${completed} / ${total}`;
+  const progressPct = total > 0 ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 0;
+  const nextTopic = dev.expected_topic ? escapeHtml(dev.expected_topic) : '&mdash;';
+  const nextPayload = dev.payload_required
+    ? (dev.expected_payload ? escapeHtml(dev.expected_payload) : '<em>required</em>')
+    : 'Any payload';
+  const timeout = dev.timeout_ms ? `${dev.time_left_ms || 0} ms left` : 'No timeout';
+  const stateKey = escapeAttr(dev.state || 'idle');
+  const deviceId = escapeAttr(dev.id || dev.device_id || '');
+  return `<div class="sequence-device" data-sequence-state="${stateKey}">
+    <div class="sequence-meta">
+      <span class="sequence-pill">Sequence: ${stateLabel}</span>
+      <span class="sequence-pill">Progress: ${progress}</span>
+      <span class="sequence-pill">${timeout}</span>
+      <button class="secondary small sequence-reset-btn" data-sequence-reset-device="${deviceId}">Reset</button>
+    </div>
+    <div class="sequence-progress"><div class="sequence-progress-bar" style="width:${progressPct}%"></div></div>
+    <div class="sequence-details">
+      <div class="sequence-detail sequence-expected"><span class="label">Expected topic</span><strong>${nextTopic}</strong></div>
+      <div class="sequence-detail"><span class="label">Expected payload</span><strong>${nextPayload}</strong></div>
+      <div class="sequence-detail"><span class="label">Reset on wrong step</span><strong>${dev.reset_on_error ? 'Yes' : 'No'}</strong></div>
+    </div>
+  </div>`;
 }
 
 function createProfile(cloneId) {
@@ -2321,6 +3253,77 @@ function injectWizardStyles() {
     .dw-wizard-nav{display:flex;justify-content:space-between;align-items:center;}
     .dw-wizard-nav .right{display:flex;gap:8px;}
     .dw-wizard-note{font-size:0.85rem;color:#94a3b8;}
+    .dw-inline-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+    .dw-inline-actions select{flex:1 1 220px;min-width:180px;}
+    .dw-inline-actions button{flex:0 0 auto;}
+    .dw-scenario-group{display:flex;flex-direction:column;gap:6px;margin-bottom:14px;}
+    .dw-scenario-group:last-child{margin-bottom:0;}
+    .dw-scenario-group-title{font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;}
+    .dw-scenario-main{display:flex;flex-direction:column;gap:6px;min-width:0;}
+    .dw-chip-row{display:flex;gap:6px;flex-wrap:wrap;}
+    .dw-chip{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.02em;}
+    .dw-chip.required{background:rgba(14,165,233,0.15);border:1px solid rgba(56,189,248,0.35);color:#bae6fd;}
+    .dw-chip.linked{background:rgba(59,130,246,0.15);border:1px solid rgba(96,165,250,0.35);color:#bfdbfe;}
+    .dw-chip.manual{background:rgba(148,163,184,0.12);border:1px solid rgba(148,163,184,0.28);color:#cbd5e1;}
+    .dw-usage-list{display:flex;flex-direction:column;gap:6px;}
+    .dw-usage-item{padding:8px 10px;border-radius:10px;border:1px solid rgba(71,85,105,0.7);background:rgba(15,23,42,0.42);color:#dbe4f0;font-size:13px;}
+    .dw-track-field{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+    .dw-track-field input{flex:1 1 260px;min-width:180px;}
+    .dw-step-title-wrap{display:flex;flex-direction:column;gap:2px;}
+    .dw-step-summary{font-size:12px;line-height:1.4;color:#cbd5e1;max-width:42rem;}
+    .dw-step-index{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;}
+    .dw-track-picker{padding:20px;display:flex;flex-direction:column;gap:14px;}
+    .dw-track-picker-head{display:flex;justify-content:space-between;align-items:center;gap:12px;}
+    .dw-track-picker-current{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border:1px solid rgba(51,65,85,0.85);border-radius:10px;background:rgba(15,23,42,0.4);}
+    .dw-track-picker-current-label{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#94a3b8;}
+    .dw-track-picker-current-value{font-size:13px;color:#e2e8f0;word-break:break-all;}
+    .dw-track-picker-results{display:flex;flex-direction:column;gap:12px;max-height:58vh;overflow:auto;padding-right:4px;}
+    .dw-track-picker-group{display:flex;flex-direction:column;gap:8px;}
+    .dw-track-picker-group-title{font-size:12px;font-weight:700;color:#cbd5e1;}
+    .dw-track-picker-items{display:flex;flex-direction:column;gap:8px;}
+    .dw-track-picker-item{display:flex;flex-direction:column;align-items:flex-start;gap:3px;width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(71,85,105,0.7);background:rgba(15,23,42,0.45);color:#e2e8f0;cursor:pointer;transition:border-color .15s ease,background .15s ease,transform .15s ease;}
+    .dw-track-picker-item:hover{border-color:rgba(96,165,250,0.62);background:rgba(30,41,59,0.85);transform:translateY(-1px);}
+    .dw-track-picker-item.active{border-color:rgba(34,197,94,0.65);background:rgba(21,128,61,0.16);}
+    .dw-track-picker-name{font-size:13px;font-weight:700;color:#f8fafc;}
+    .dw-track-picker-path{font-size:11px;color:#94a3b8;word-break:break-all;text-align:left;}
+    .dw-step-preset-panel{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;width:100%;}
+    .dw-step-preset-group{border:1px solid rgba(51,65,85,0.85);border-radius:10px;padding:10px;background:rgba(15,23,42,0.45);display:flex;flex-direction:column;gap:8px;}
+    .dw-step-preset-title{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#94a3b8;}
+    .dw-step-presets{display:flex;gap:8px;flex-wrap:wrap;}
+    .dw-step-presets button{margin:0;}
+    .dw-step-preset-btn{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-width:150px;padding:10px 12px;border:1px solid rgba(71,85,105,0.9);border-radius:10px;background:linear-gradient(180deg,rgba(15,23,42,0.9),rgba(15,23,42,0.72));color:#e2e8f0;cursor:pointer;transition:border-color .15s ease,transform .15s ease,background .15s ease,box-shadow .15s ease;}
+    .dw-step-preset-btn:hover{border-color:rgba(96,165,250,0.7);background:linear-gradient(180deg,rgba(15,23,42,1),rgba(30,41,59,0.88));transform:translateY(-1px);box-shadow:0 10px 22px rgba(2,6,23,0.28);}
+    .dw-step-preset-label{font-size:13px;font-weight:700;color:#f8fafc;}
+    .dw-step-preset-desc{font-size:11px;line-height:1.35;color:#94a3b8;text-align:left;}
+    .dw-wait-panel{border:1px solid rgba(51,65,85,0.85);border-radius:12px;padding:12px;background:rgba(15,23,42,0.38);display:flex;flex-direction:column;gap:12px;}
+    .dw-wait-panel-head{display:flex;flex-direction:column;gap:8px;}
+    .dw-wait-headline{font-size:14px;font-weight:700;color:#e2e8f0;}
+    .dw-wait-summary{display:flex;gap:6px;flex-wrap:wrap;}
+    .dw-wait-chip{display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;background:rgba(96,165,250,0.14);border:1px solid rgba(96,165,250,0.28);color:#dbeafe;font-size:12px;font-weight:600;}
+    .dw-wait-settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;}
+    .dw-known-flags{display:flex;flex-direction:column;gap:8px;}
+    .dw-known-flags-title{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#94a3b8;}
+    .dw-known-flags-list{display:flex;gap:8px;flex-wrap:wrap;}
+    .dw-flag-chip-btn{display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid rgba(96,165,250,0.28);background:rgba(59,130,246,0.12);color:#dbeafe;font-size:12px;font-weight:600;cursor:pointer;transition:border-color .15s ease,background .15s ease,transform .15s ease;}
+    .dw-flag-chip-btn:hover{border-color:rgba(96,165,250,0.6);background:rgba(59,130,246,0.2);transform:translateY(-1px);}
+    .dw-wait-card{border:1px solid rgba(71,85,105,0.75);border-radius:10px;padding:10px;background:rgba(15,23,42,0.52);display:flex;flex-direction:column;gap:10px;}
+    .dw-wait-card-head{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+    .dw-wait-card-title{font-size:12px;font-weight:700;color:#e2e8f0;}
+    .dw-wait-row{display:grid;grid-template-columns:minmax(140px,1fr) 120px minmax(140px,1fr);gap:8px;align-items:center;}
+    .dw-wait-preview{font-size:12px;color:#94a3b8;}
+    @media(max-width:900px){.dw-wait-row{grid-template-columns:1fr;}.dw-wait-preview{padding-top:2px;}}
+    .dw-validation{margin:10px 0 14px;padding:12px 14px;border:1px solid #334155;border-radius:12px;background:#0f172a;}
+    .dw-validation.hidden{display:none;}
+    .dw-validation-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap;}
+    .dw-validation-title{font-weight:600;color:#e2e8f0;}
+    .dw-validation-badges{display:flex;gap:8px;flex-wrap:wrap;}
+    .dw-validation-badge{display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;font-size:12px;font-weight:600;}
+    .dw-validation-badge.error{background:rgba(239,68,68,0.16);color:#fecaca;border:1px solid rgba(239,68,68,0.3);}
+    .dw-validation-badge.warning{background:rgba(245,158,11,0.16);color:#fde68a;border:1px solid rgba(245,158,11,0.3);}
+    .dw-validation-list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;}
+    .dw-validation-item{font-size:13px;line-height:1.45;}
+    .dw-validation-item.error{color:#fecaca;}
+    .dw-validation-item.warning{color:#fde68a;}
   `;
   document.head.appendChild(style);
 }
@@ -2344,6 +3347,70 @@ function runScenario(deviceId, scenarioId) {
     })
     .catch(err => {
       setStatus('Run failed: ' + err.message, '#f87171');
+    });
+}
+
+function resetSequence(deviceId, btn) {
+  const devId = toSafeString(deviceId).trim();
+  if (!devId) {
+    setStatus('Sequence reset failed: missing device id', '#f87171');
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+  }
+  setStatus('Resetting sequence...', '#fbbf24');
+  fetch(`/api/devices/sequence/reset?device=${encodeURIComponent(devId)}`, {method: 'POST'})
+    .then(async (r) => {
+      const text = await r.text().catch(() => '');
+      if (!r.ok) {
+        throw new Error((text || '').trim() || ('HTTP ' + r.status));
+      }
+      return text;
+    })
+    .then(() => {
+      setStatus('Sequence reset', '#22c55e');
+      return loadStatus().catch(() => {});
+    })
+    .catch((err) => {
+      setStatus('Sequence reset failed: ' + err.message, '#f87171');
+    })
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+      }
+    });
+}
+
+function resetSignal(deviceId, btn) {
+  const devId = toSafeString(deviceId).trim();
+  if (!devId) {
+    setStatus('Signal reset failed: missing device id', '#f87171');
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+  }
+  setStatus('Resetting signal hold...', '#fbbf24');
+  fetch(`/api/devices/signal/reset?device=${encodeURIComponent(devId)}`, {method: 'POST'})
+    .then(async (r) => {
+      const text = await r.text().catch(() => '');
+      if (!r.ok) {
+        throw new Error((text || '').trim() || ('HTTP ' + r.status));
+      }
+      return text;
+    })
+    .then(() => {
+      setStatus('Signal hold reset', '#22c55e');
+      return loadStatus().catch(() => {});
+    })
+    .catch((err) => {
+      setStatus('Signal reset failed: ' + err.message, '#f87171');
+    })
+    .finally(() => {
+      if (btn) {
+        btn.disabled = false;
+      }
     });
 }
 function openWizard(templateId) {
@@ -2621,7 +3688,6 @@ function buildDeviceFromWizard() {
   const base = {
     id: id || slugify(name),
     display_name: name || 'Device',
-    topics: [],
     scenarios: [],
   };
   if (typeof tpl.build === 'function') {

@@ -105,6 +105,46 @@ esp_err_t devices_run_handler(httpd_req_t *req)
     return web_ui_send_ok(req, "application/json", "{\"status\":\"queued\"}");
 }
 
+esp_err_t devices_signal_reset_handler(httpd_req_t *req)
+{
+    char query[192] = {0};
+    char devid[DEVICE_MANAGER_ID_MAX_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "device", devid, sizeof(devid));
+    }
+    if (!devid[0]) {
+        return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "device required"));
+    }
+    esp_err_t err = dm_template_runtime_reset_signal(devid);
+    if (err == ESP_ERR_NOT_FOUND) {
+        return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "signal runtime not found"));
+    }
+    if (err != ESP_OK) {
+        return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, esp_err_to_name(err)));
+    }
+    return web_ui_send_ok(req, "application/json", "{\"status\":\"reset\"}");
+}
+
+esp_err_t devices_sequence_reset_handler(httpd_req_t *req)
+{
+    char query[192] = {0};
+    char devid[DEVICE_MANAGER_ID_MAX_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "device", devid, sizeof(devid));
+    }
+    if (!devid[0]) {
+        return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "device required"));
+    }
+    esp_err_t err = dm_template_runtime_reset_sequence(devid);
+    if (err == ESP_ERR_NOT_FOUND) {
+        return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "sequence runtime not found"));
+    }
+    if (err != ESP_OK) {
+        return WEB_HTTP_CHECK(httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, esp_err_to_name(err)));
+    }
+    return web_ui_send_ok(req, "application/json", "{\"status\":\"reset\"}");
+}
+
 esp_err_t devices_profile_create_handler(httpd_req_t *req)
 {
     char query[256];

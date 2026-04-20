@@ -40,6 +40,39 @@ Detailed architecture notes are in:
 
 - `docs/ARCHITECTURE.md`
 
+## Startup Policy
+
+The firmware uses three practical boot classes:
+
+- `BOOT_FATAL` - platform infrastructure that must succeed before normal boot continues
+- `BOOT_DEFERRED_FATAL` - product services that may start in a later bootstrap stage but are still mandatory for a usable device
+- `BOOT_OPTIONAL` - services that may fail without blocking the rest of the product
+
+Current mapping:
+
+- `BOOT_FATAL`
+  - `nvs_flash`
+  - `ota_manager`
+  - `config_store`
+  - `event_bus`
+  - `service_status`
+  - `error_monitor`
+- `BOOT_DEFERRED_FATAL`
+  - `network`
+  - `mqtt_core`
+  - `web_ui`
+  - `device_manager`
+  - `device_runtime`
+  - `automation_engine`
+- `BOOT_OPTIONAL`
+  - `audio_player`
+
+Current implementation note:
+
+- the policy is explicit and documented
+- deferred-fatal startup still runs through a dedicated bootstrap task in `main/main.c`
+- this is a working startup scheme, but not yet a fully unified startup orchestrator
+
 ## Requirements
 
 - ESP32-S3
@@ -56,6 +89,36 @@ idf.py menuconfig
 idf.py build
 idf.py -p COMx flash monitor
 ```
+
+## Tests
+
+The project has automated tests at multiple levels:
+
+- `tests/device_manager` - parse/model and pure runtime tests
+- `tests/template_runtime_integration` - template runtime wiring and integration tests
+- `tests/mqtt_core` - local broker unit/regression tests
+- `tests/stress_chaos_tests` - external protocol/stress scripts against a running broker
+
+Key documented coverage includes:
+
+- config parse/export validation
+- template runtime integration for:
+  - `uid_validator`
+  - `on_mqtt_event`
+  - `on_flag`
+  - `if_condition`
+  - `interval_task`
+  - `sequence_lock`
+  - `signal_hold`
+- MQTT broker semantics:
+  - retained messages
+  - wildcard routing
+  - max subscriptions
+  - soak/stability checks
+
+Detailed test notes and run commands are in:
+
+- `docs/TESTING.md`
 
 ## Important Runtime Storage
 
@@ -157,6 +220,7 @@ The current template set includes:
 - `sequence_lock`
 
 Templates are configuration-driven. Their runtime state lives in `device_runtime`.
+Legacy per-device `topics` bindings were removed. MQTT-driven scenario launches should now be modeled through the `on_mqtt_event` template.
 
 ### Scenarios
 
@@ -181,10 +245,20 @@ Audio is handled by `audio_player`.
 Responsibilities:
 
 - playback control
-- decode/read pipeline
+- runtime command routing
+- reader and decode pipeline
 - I2S output
 - playback status
 - volume persistence
+
+Internal split:
+
+- `audio_player.c` - public facade
+- `audio_player_runtime.c` - runtime owner, command queue and playback lifecycle
+- `audio_player_decode.c` - reader worker and decode path
+- `audio_player_output.c` - I2S output
+- `audio_player_status.c` - playback status
+- `audio_player_volume.c` - volume persistence
 
 The SD card is not owned by audio anymore. Audio uses `sd_storage` like any other consumer.
 
@@ -250,7 +324,9 @@ main/
 
 Likely next evolutions:
 
+- unified startup orchestrator instead of procedural deferred bootstrap
 - additional runtime snapshot/read-model cleanup
 - finer split inside `device_manager`
+- further cleanup of `audio_player` if playback complexity grows
 - more OTA diagnostics
 - more tests around config/profile/runtime transitions
